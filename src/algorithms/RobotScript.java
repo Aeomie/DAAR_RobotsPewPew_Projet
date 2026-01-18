@@ -13,8 +13,9 @@ public class RobotScript extends Brain {
     private static final double ANGLEPRECISION = 0.1;
 
     private enum Role { BEATER, SEEKER, UNDEFINED }
-    private enum State { TURN_LEFT, MOVE, TURN_RIGHT, U_TURN, SINK, IDLE , MEET_POINT, ATTACK_ENEMY }
-
+    private enum State {
+        TURN_LEFT, MOVE, TURN_RIGHT, U_TURN_LEFT, U_TURN_RIGHT, U_TURN_LEFT_AGAIN, U_TURN_RIGHT_AGAIN, SINK, IDLE, MEET_POINT, ATTACK_ENEMY
+    }
     //---VARIABLES---//
     private Role role = Role.UNDEFINED;
     private State state = State.IDLE;
@@ -27,13 +28,15 @@ public class RobotScript extends Brain {
     private double meetPointX = 1500; // Example X coordinate for meeting point
     private double meetPointY = 1500; // Example Y coordinate for meeting point
     private boolean is_Going_MeetPoint = false;
+    private boolean meetingPointCompleted = false;
 
     // Wall distance tracking variables
     private boolean wallDetected = false;
     private double wallDetectionX = 0;
     private double wallDetectionY = 0;
     private double wallAvoidanceDistance = 100;
-
+    // U-turn direction toggle
+    private boolean useLeftUturn = false;
 
     // -- ENEMY VARIABLES -- //
     private static final int ENEMY_DETECTION_DISTANCE = 400; // in mm
@@ -80,8 +83,11 @@ public class RobotScript extends Brain {
         // Simple, readable state machine using helper methods
         switch (state) {
             case IDLE:
-                sendLogMessage("=== IDLE state: switching to TURN_LEFT ===");
-                state = State.TURN_LEFT;
+                sendLogMessage("=== IDLE state: Starting 360° rotation ===");
+                // Alternate between left and right U-turns (both now do full 360°)
+                state = useLeftUturn ? State.U_TURN_LEFT : State.U_TURN_RIGHT;
+                useLeftUturn = !useLeftUturn; // Toggle for next time
+                oldAngle = getHeading();
                 return;
             case TURN_LEFT:
                 // Face NORTH
@@ -94,13 +100,13 @@ public class RobotScript extends Brain {
                 return;
 
             case MOVE:
-//                if (moveCounter < MOVES_BEFORE_MEETING) {
-//                    moveCounter++;
-//                } else {
-//                    if (!is_Going_MeetPoint) {
-//                        is_Going_MeetPoint = true;
-//                    }
-//                }
+                if (moveCounter < MOVES_BEFORE_MEETING) {
+                    moveCounter++;
+                } else {
+                    if (!is_Going_MeetPoint && !meetingPointCompleted) {
+                        is_Going_MeetPoint = true;
+                    }
+                }
 
                 if (obstacleCheck()) {
                     state = State.TURN_RIGHT;
@@ -150,6 +156,7 @@ public class RobotScript extends Brain {
                 return;
             case MEET_POINT:
 
+
             case ATTACK_ENEMY:
                 if (enemyCheck()) {
                     shootEnemy();
@@ -165,6 +172,54 @@ public class RobotScript extends Brain {
 
                 // Clear to move
                 state = State.MOVE;
+                return;
+
+            case U_TURN_LEFT:
+                // Turn left 180 degrees (first half of 360°)
+                if (!isSameDirection(getHeading(), normalizeAngle(oldAngle + Math.PI))) {
+                    stepTurn(Parameters.Direction.LEFT);
+                    return;
+                }
+                // Reached 180° - continue to complete full 360° rotation
+                sendLogMessage("=== U_TURN_LEFT: First 180° complete, continuing to 360° ===");
+                state = State.U_TURN_LEFT_AGAIN;
+                oldAngle = getHeading(); // Update reference angle for next 180°
+                return;
+
+            case U_TURN_LEFT_AGAIN:
+                // Turn left another 180 degrees (second half of 360°)
+                if (!isSameDirection(getHeading(), normalizeAngle(oldAngle + Math.PI))) {
+                    stepTurn(Parameters.Direction.LEFT);
+                    return;
+                }
+                // Completed full 360° rotation
+                sendLogMessage("=== U_TURN_LEFT_AGAIN: Full 360° rotation complete! ===");
+                state = State.MOVE;
+                startMove();
+                return;
+
+            case U_TURN_RIGHT:
+                // Turn right 180 degrees (first half of 360°)
+                if (!isSameDirection(getHeading(), normalizeAngle(oldAngle + Math.PI))) {
+                    stepTurn(Parameters.Direction.RIGHT);
+                    return;
+                }
+                // Reached 180° - continue to complete full 360° rotation
+                sendLogMessage("=== U_TURN_RIGHT: First 180° complete, continuing to 360° ===");
+                state = State.U_TURN_RIGHT_AGAIN;
+                oldAngle = getHeading(); // Update reference angle for next 180°
+                return;
+
+            case U_TURN_RIGHT_AGAIN:
+                // Turn right another 180 degrees (second half of 360°)
+                if (!isSameDirection(getHeading(), normalizeAngle(oldAngle + Math.PI))) {
+                    stepTurn(Parameters.Direction.RIGHT);
+                    return;
+                }
+                // Completed full 360° rotation
+                sendLogMessage("=== U_TURN_RIGHT_AGAIN: Full 360° rotation complete! ===");
+                state = State.MOVE;
+                startMove();
                 return;
 
             default:
@@ -347,29 +402,31 @@ public class RobotScript extends Brain {
     private void meetAtPoint(double x, double y, double precision) {
         double distance = Math.hypot(x - myX, y - myY);
 
-        if (distance >= precision) {
-            // Calculate angle to target
-            double angleToTarget = Math.atan2(y - myY, x - myX);
-
-            // Calculate shortest turn direction
-            if (!isSameDirection(getHeading(), angleToTarget)) {
-                double diff = normalizeAngle(angleToTarget - getHeading());
-
-                // If difference is less than 180°, turn right; otherwise turn left
-                Parameters.Direction dir = (diff < Math.PI) ? Parameters.Direction.RIGHT : Parameters.Direction.LEFT;
-                stepTurn(dir);
-                return;
-            }
-
-            // Move forward when aligned
-            if (!obstacleCheck()) {
-                startMove();
-            }
+        if (distance < precision) {
+            // Arrived at meeting point - switch to IDLE to trigger U-turn
+            sendLogMessage(">>> Arrived at meeting point! Switching to IDLE for U-turn.");
+            is_Going_MeetPoint = false; // Reset flag
+            meetingPointCompleted = true; // Mark as completed to prevent re-triggering
+            state = State.IDLE;
             return;
         }
 
-        // Arrived at point - do a full 360° turn
-        stepTurn(Parameters.Direction.RIGHT);
+        // Calculate angle to target
+        double angleToTarget = Math.atan2(y - myY, x - myX);
+
+        // Calculate shortest turn direction
+        if (!isSameDirection(getHeading(), angleToTarget)) {
+            double diff = normalizeAngle(angleToTarget - getHeading());
+            Parameters.Direction dir = (diff < Math.PI) ? Parameters.Direction.RIGHT : Parameters.Direction.LEFT;
+            stepTurn(dir);
+            return;
+        }
+
+        // Move forward when aligned
+        if (!obstacleCheck()) {
+            startMove();
+        }
     }
+
 
 }
