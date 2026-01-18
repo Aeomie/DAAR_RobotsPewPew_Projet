@@ -4,6 +4,8 @@ import characteristics.IFrontSensorResult;
 import characteristics.IRadarResult;
 import characteristics.Parameters;
 import robotsimulator.Brain;
+
+import java.lang.reflect.Array;
 import java.util.ArrayList;
 
 public class RobotScript extends Brain {
@@ -11,7 +13,7 @@ public class RobotScript extends Brain {
     private static final double ANGLEPRECISION = 0.1;
 
     private enum Role { BEATER, SEEKER, UNDEFINED }
-    private enum State { TURN_LEFT, MOVE, TURN_RIGHT, U_TURN, SINK, IDLE , MEET_POINT, ATTACLK_ENEMY }
+    private enum State { TURN_LEFT, MOVE, TURN_RIGHT, U_TURN, SINK, IDLE , MEET_POINT, ATTACK_ENEMY }
 
     //---VARIABLES---//
     private Role role = Role.UNDEFINED;
@@ -35,6 +37,7 @@ public class RobotScript extends Brain {
 
     // -- ENEMY VARIABLES -- //
     private static final int ENEMY_DETECTION_DISTANCE = 400; // in mm
+    private static final int WRECK_DETECTION_DISTANCE = 400; // in mm
     public RobotScript() { super(); }
 
     @Override
@@ -108,7 +111,7 @@ public class RobotScript extends Brain {
 
                 if (enemyCheck()) {
                     sendLogMessage("!!! Enemy found! Switching to ATTACLK_ENEMY state !!!");
-                    state = State.ATTACLK_ENEMY;
+                    state = State.ATTACK_ENEMY;
                     isMoving = false;
                     return;
                 }
@@ -147,8 +150,23 @@ public class RobotScript extends Brain {
                 return;
             case MEET_POINT:
 
-            case ATTACLK_ENEMY:
+            case ATTACK_ENEMY:
+                if (enemyCheck()) {
+                    shootEnemy();
+                    return; // Stay in ATTACK_ENEMY
+                }
+
+                // No valid targets - check for obstacles before moving
+                if (obstacleCheck()) {
+                    state = State.TURN_RIGHT;
+                    oldAngle = getHeading();
+                    return;
+                }
+
+                // Clear to move
+                state = State.MOVE;
                 return;
+
             default:
                 return;
         }
@@ -196,16 +214,55 @@ public class RobotScript extends Brain {
         return res;
     }
 
+    private void shootEnemy(){
+        ArrayList<IRadarResult> enemiesShooters = new ArrayList<>();
+        ArrayList<IRadarResult> enemiesScouts = new ArrayList<>();
+
+        for (IRadarResult o : detectRadar()) {
+            if ((o.getObjectType() == IRadarResult.Types.OpponentMainBot ||
+                    o.getObjectType() == IRadarResult.Types.OpponentSecondaryBot) &&
+                    o.getObjectDistance() <= ENEMY_DETECTION_DISTANCE
+            ) {
+                if(o.getObjectType() == IRadarResult.Types.OpponentMainBot){
+                    enemiesShooters.add(o);
+                } else {
+                    enemiesScouts.add(o);
+                }
+            }
+        }
+
+        if (!enemiesShooters.isEmpty()) {
+            // Shoot at the closest shooter
+            IRadarResult target = enemiesShooters.get(0);
+            for (IRadarResult enemy : enemiesShooters) {
+                if (enemy.getObjectDistance() < target.getObjectDistance()) {
+                    target = enemy;
+                }
+            }
+            fire(target.getObjectDirection()); // FIX: fire at direction, not heading
+            sendLogMessage("Shooting at enemy shooter at " + (int)target.getObjectDistance() + "mm (health data not available via radar)");
+
+        } else if (!enemiesScouts.isEmpty()) {
+            IRadarResult target = enemiesScouts.get(0);
+            for (IRadarResult enemy : enemiesScouts) {
+                if (enemy.getObjectDistance() < target.getObjectDistance()) {
+                    target = enemy;
+                }
+            }
+            fire(target.getObjectDirection());
+            sendLogMessage("Shooting at enemy scout at " + (int)target.getObjectDistance() + "mm (health data not available via radar)");
+        }
+    }
+
+
     private boolean obstacleCheck(){
         // Wreck is when a robot dies and leaves debris
 
         for (IRadarResult o : detectRadar()) {
             double objDir = o.getObjectDirection();
 
-            if (o.getObjectDistance() <= 100 & isSameDirection(getHeading(), objDir) &&
+            if (o.getObjectDistance() <= WRECK_DETECTION_DISTANCE & isSameDirection(getHeading(), objDir) &&
             o.getObjectType() == IRadarResult.Types.Wreck){
-                sendLogMessage("same direction ? : " + isSameDirection(getHeading(), objDir)
-                + " Object type : "+ o.getObjectType());
                 return true;
             }
         }
@@ -247,22 +304,46 @@ public class RobotScript extends Brain {
         return false;
     }
 
+    private boolean isBlockedByWreck(double enemyDirection, double enemyDistance) {
+        double botRadius = Parameters.teamAMainBotRadius; // or teamBMainBotRadius (all same = 50mm)
+
+        for (IRadarResult wreck : detectRadar()) {
+            if (wreck.getObjectType() == IRadarResult.Types.Wreck &&
+                    wreck.getObjectDistance() < enemyDistance) {
+
+                // Calculate angular width: bot appears wider when closer
+                double angularWidth = Math.atan(botRadius / wreck.getObjectDistance());
+
+                double angleDiff = Math.abs(normalizeAngle(wreck.getObjectDirection() - enemyDirection));
+                if (angleDiff > Math.PI) angleDiff = 2 * Math.PI - angleDiff;
+
+                if (angleDiff <= angularWidth) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     private boolean enemyCheck() {
-        /*
-        Just placeholder for now
-         */
         for (IRadarResult o : detectRadar()) {
             if ((o.getObjectType() == IRadarResult.Types.OpponentMainBot ||
-                o.getObjectType() == IRadarResult.Types.OpponentSecondaryBot) &&
-                o.getObjectDistance() <= ENEMY_DETECTION_DISTANCE
-            ) {
+                    o.getObjectType() == IRadarResult.Types.OpponentSecondaryBot) &&
+                    o.getObjectDistance() <= ENEMY_DETECTION_DISTANCE) {
 
-                sendLogMessage(">>> Enemy detected at distance " + (int)o.getObjectDistance() + "mm, direction " + o.getObjectDirection());
+                // Skip enemies blocked by wrecks
+                if (isBlockedByWreck(o.getObjectDirection(), o.getObjectDistance())) {
+                    sendLogMessage(">>> Enemy blocked by wreck, ignoring.");
+                    continue;
+                }
+
+//                sendLogMessage(">>> Live enemy detected at " + (int)o.getObjectDistance() + "mm");
                 return true;
             }
         }
         return false;
     }
+
     private void meetAtPoint(double x, double y, double precision) {
         double distance = Math.hypot(x - myX, y - myY);
 
