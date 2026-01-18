@@ -11,7 +11,7 @@ public class RobotScript extends Brain {
     private static final double ANGLEPRECISION = 0.1;
 
     private enum Role { BEATER, SEEKER, UNDEFINED }
-    private enum State { TURN_LEFT, MOVE, TURN_RIGHT, U_TURN, SINK, IDLE , MEET_POINT }
+    private enum State { TURN_LEFT, MOVE, TURN_RIGHT, U_TURN, SINK, IDLE , MEET_POINT, ATTACLK_ENEMY }
 
     //---VARIABLES---//
     private Role role = Role.UNDEFINED;
@@ -20,12 +20,21 @@ public class RobotScript extends Brain {
     private double oldAngle;
     private boolean isMoving;
 
+    private static final int MOVES_BEFORE_MEETING = 50;
+    private int moveCounter = 0;
+    private double meetPointX = 1500; // Example X coordinate for meeting point
+    private double meetPointY = 1500; // Example Y coordinate for meeting point
+    private boolean is_Going_MeetPoint = false;
+
     // Wall distance tracking variables
     private boolean wallDetected = false;
     private double wallDetectionX = 0;
     private double wallDetectionY = 0;
     private double wallAvoidanceDistance = 100;
 
+
+    // -- ENEMY VARIABLES -- //
+    private static final int ENEMY_DETECTION_DISTANCE = 400; // in mm
     public RobotScript() { super(); }
 
     @Override
@@ -82,17 +91,35 @@ public class RobotScript extends Brain {
                 return;
 
             case MOVE:
-//                sendLogMessage("=== MOVE state: checking for obstacles ===");
+//                if (moveCounter < MOVES_BEFORE_MEETING) {
+//                    moveCounter++;
+//                } else {
+//                    if (!is_Going_MeetPoint) {
+//                        is_Going_MeetPoint = true;
+//                    }
+//                }
 
                 if (obstacleCheck()) {
-//                    sendLogMessage("!!! Obstacle found! Switching to TURN_RIGHT state !!!");
                     state = State.TURN_RIGHT;
                     oldAngle = getHeading();
-                    // Robot is blocked - do NOT move, so isMoving stays false
                     isMoving = false;
                     return;
                 }
-//                sendLogMessage("No obstacle found move");
+
+                if (enemyCheck()) {
+                    sendLogMessage("!!! Enemy found! Switching to ATTACLK_ENEMY state !!!");
+                    state = State.ATTACLK_ENEMY;
+                    isMoving = false;
+                    return;
+                }
+
+                // Handle meeting point navigation
+                if (is_Going_MeetPoint) {
+                    meetAtPoint(meetPointX, meetPointY, 50);
+                    return; // ← ADD THIS! Prevents startMove() from executing
+                }
+
+                // Normal movement
                 startMove();
                 return;
 
@@ -118,7 +145,10 @@ public class RobotScript extends Brain {
                 sendLogMessage("SINK: moving forward");
                 startMove();
                 return;
+            case MEET_POINT:
 
+            case ATTACLK_ENEMY:
+                return;
             default:
                 return;
         }
@@ -217,32 +247,47 @@ public class RobotScript extends Brain {
         return false;
     }
 
-    private void meetAtPoint(double x, double y, double precision) {
-        // Calcule la distance au point cible
-        double distance = Math.hypot(myX - x, myY - y);
+    private boolean enemyCheck() {
+        /*
+        Just placeholder for now
+         */
+        for (IRadarResult o : detectRadar()) {
+            if ((o.getObjectType() == IRadarResult.Types.OpponentMainBot ||
+                o.getObjectType() == IRadarResult.Types.OpponentSecondaryBot) &&
+                o.getObjectDistance() <= ENEMY_DETECTION_DISTANCE
+            ) {
 
-        // Si pas encore arrivé au point
+                sendLogMessage(">>> Enemy detected at distance " + (int)o.getObjectDistance() + "mm, direction " + o.getObjectDirection());
+                return true;
+            }
+        }
+        return false;
+    }
+    private void meetAtPoint(double x, double y, double precision) {
+        double distance = Math.hypot(x - myX, y - myY);
+
         if (distance >= precision) {
-            // Calcule l'angle vers le point cible
+            // Calculate angle to target
             double angleToTarget = Math.atan2(y - myY, x - myX);
 
-            // Tourne vers le point
+            // Calculate shortest turn direction
             if (!isSameDirection(getHeading(), angleToTarget)) {
                 double diff = normalizeAngle(angleToTarget - getHeading());
+
+                // If difference is less than 180°, turn right; otherwise turn left
                 Parameters.Direction dir = (diff < Math.PI) ? Parameters.Direction.RIGHT : Parameters.Direction.LEFT;
                 stepTurn(dir);
                 return;
             }
 
-            // Avance vers le point
+            // Move forward when aligned
             if (!obstacleCheck()) {
                 startMove();
             }
             return;
         }
 
-        // Arrivé au point -> faire un tour complet (360°)
-        // Tu devras ajouter une variable pour tracker si le tour est terminé
+        // Arrived at point - do a full 360° turn
         stepTurn(Parameters.Direction.RIGHT);
     }
 
