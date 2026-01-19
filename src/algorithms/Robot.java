@@ -5,11 +5,13 @@ import characteristics.IRadarResult;
 import characteristics.Parameters;
 import robotsimulator.Brain;
 
+import java.util.ArrayList;
+
 public class Robot extends Brain {
 
     private enum Role { BEATER, SEEKER, UNDEFINED }
     private enum State {
-        MOVE, TURNING, BACKING_UP, WAITING, IDLE
+        MOVE, TURNING, BACKING_UP, WAITING, ATTACKING, IDLE
     }
     //---VARIABLES---//
     private Role role = Role.UNDEFINED;
@@ -25,7 +27,7 @@ public class Robot extends Brain {
     private static final int MAX_WAIT_TIME = 5;
 
     // --- DETECTION RANGES ---
-    private static final int ENEMY_DETECTION_DISTANCE = 100;
+    private static final int ENEMY_DETECTION_DISTANCE = 400;
     private static final int WRECK_DETECTION_DISTANCE = 100;
     private static final int TEAMMATE_DETECTION_DISTANCE = 120;
     private static final int SECONDARY_BOT_DETECTION_DISTANCE = 80;
@@ -57,6 +59,11 @@ public class Robot extends Brain {
     public void step() {
         updateOdometry();
 
+        // Check for enemies first - highest priority
+        if (enemyCheck() && state != State.ATTACKING) {
+            state = State.ATTACKING;
+        }
+
         switch(state) {
             case IDLE:
                 state = State.MOVE;
@@ -64,6 +71,12 @@ public class Robot extends Brain {
                 break;
 
             case MOVE:
+                // Check for enemies while moving
+                if (enemyCheck()) {
+                    state = State.ATTACKING;
+                    break;
+                }
+
                 if (!obstacleCheck()) {
                     myMove();
                     consecutiveBlocked = 0;
@@ -81,6 +94,15 @@ public class Robot extends Brain {
                         state = State.BACKING_UP;
                         backupSteps = 0;
                     }
+                }
+                break;
+
+            case ATTACKING:
+                if (enemyCheck()) {
+                    shootEnemy();
+                } else {
+                    // No more enemies visible, return to movement
+                    state = State.MOVE;
                 }
                 break;
 
@@ -121,6 +143,92 @@ public class Robot extends Brain {
                 break;
         }
     }
+
+    // === COMBAT METHODS === //
+
+    private void shootEnemy() {
+        ArrayList<IRadarResult> enemiesShooters = new ArrayList<>();
+        ArrayList<IRadarResult> enemiesScouts = new ArrayList<>();
+
+        for (IRadarResult o : detectRadar()) {
+            if ((o.getObjectType() == IRadarResult.Types.OpponentMainBot ||
+                    o.getObjectType() == IRadarResult.Types.OpponentSecondaryBot) &&
+                    o.getObjectDistance() <= ENEMY_DETECTION_DISTANCE) {
+
+                // Check if wreck is blocking line of sight
+                if (isBlockedByWreck(o.getObjectDirection(), o.getObjectDistance())) {
+                    continue;
+                }
+
+                if (o.getObjectType() == IRadarResult.Types.OpponentMainBot) {
+                    enemiesShooters.add(o);
+                } else {
+                    enemiesScouts.add(o);
+                }
+            }
+        }
+
+        // Prioritize main bots (shooters) over secondary bots (scouts)
+        if (!enemiesShooters.isEmpty()) {
+            IRadarResult target = enemiesShooters.get(0);
+            for (IRadarResult enemy : enemiesShooters) {
+                if (enemy.getObjectDistance() < target.getObjectDistance()) {
+                    target = enemy;
+                }
+            }
+            fire(target.getObjectDirection());
+            sendLogMessage("Firing at enemy main bot at " + (int)target.getObjectDistance() + "mm");
+
+        } else if (!enemiesScouts.isEmpty()) {
+            IRadarResult target = enemiesScouts.get(0);
+            for (IRadarResult enemy : enemiesScouts) {
+                if (enemy.getObjectDistance() < target.getObjectDistance()) {
+                    target = enemy;
+                }
+            }
+            fire(target.getObjectDirection());
+            sendLogMessage("Firing at enemy secondary bot at " + (int)target.getObjectDistance() + "mm");
+        }
+    }
+
+    private boolean enemyCheck() {
+        for (IRadarResult o : detectRadar()) {
+            if ((o.getObjectType() == IRadarResult.Types.OpponentMainBot ||
+                    o.getObjectType() == IRadarResult.Types.OpponentSecondaryBot) &&
+                    o.getObjectDistance() <= ENEMY_DETECTION_DISTANCE) {
+
+                // Don't count enemies blocked by wrecks
+                if (isBlockedByWreck(o.getObjectDirection(), o.getObjectDistance())) {
+                    continue;
+                }
+
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isBlockedByWreck(double enemyDirection, double enemyDistance) {
+        double botRadius = Parameters.teamAMainBotRadius;
+
+        for (IRadarResult wreck : detectRadar()) {
+            if (wreck.getObjectType() == IRadarResult.Types.Wreck &&
+                    wreck.getObjectDistance() < enemyDistance) {
+
+                // Calculate if wreck blocks the line of sight to enemy
+                double angularWidth = Math.atan(botRadius / wreck.getObjectDistance());
+                double angleDiff = Math.abs(normalize(wreck.getObjectDirection() - enemyDirection));
+                if (angleDiff > Math.PI) angleDiff = 2 * Math.PI - angleDiff;
+
+                if (angleDiff <= angularWidth) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // === NAVIGATION METHODS === //
 
     private void handleTeammateEncounter() {
         // Use role-based priority: SEEKER has priority over BEATER
@@ -206,7 +314,7 @@ public class Robot extends Brain {
 
     private void updateOdometry() {
         boolean blockedByWall = detectWall();
-        boolean blockedByWreck = isBlockedByWreck();
+        boolean blockedByWreck = isBlockedByWreckObstacle();
         boolean blockedByTeamMate = isBlockedByTeamMate();
         boolean blockedByOpponent = isBlockedByOpponent();
 
@@ -257,19 +365,19 @@ public class Robot extends Brain {
     }
 
     private boolean obstacleCheck() {
-        return detectWall() || isBlockedByWreck() || isBlockedByTeamMate()
+        return detectWall() || isBlockedByWreckObstacle() || isBlockedByTeamMate()
                 || isBlockedByOpponent();
     }
 
     private boolean isBlockedByTeamMainBotOnly() {
         // Returns true ONLY if blocked by main teammate and nothing else
-        return isBlockedByTeamMainBot() && !detectWall() && !isBlockedByWreck()
+        return isBlockedByTeamMainBot() && !detectWall() && !isBlockedByWreckObstacle()
                 && !isBlockedBySecondaryBot() && !isBlockedByOpponent();
     }
 
     private boolean isBlockedBySecondaryBotOnly() {
         // Returns true ONLY if blocked by secondary bot and nothing else
-        return isBlockedBySecondaryBot() && !detectWall() && !isBlockedByWreck()
+        return isBlockedBySecondaryBot() && !detectWall() && !isBlockedByWreckObstacle()
                 && !isBlockedByTeamMainBot() && !isBlockedByOpponent();
     }
 
@@ -277,7 +385,7 @@ public class Robot extends Brain {
         return detectFront().getObjectType() == IFrontSensorResult.Types.WALL;
     }
 
-    private boolean isBlockedByWreck() {
+    private boolean isBlockedByWreckObstacle() {
         for (IRadarResult o : detectRadar())
             if (o.getObjectType() == IRadarResult.Types.Wreck
                     && isInFront(o.getObjectDirection())
