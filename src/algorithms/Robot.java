@@ -9,13 +9,14 @@ import java.util.ArrayList;
 
 public class Robot extends Brain {
 
-    private enum Role { BEATER, SEEKER, UNDEFINED }
+    private enum Role { WARIO, MARIO, LUIGI, UNDEFINED }
     private enum State {
         MOVE, TURNING, BACKING_UP, WAITING, ATTACKING, CONVERGING, IDLE
     }
 
     //---VARIABLES---//
     private Role role = Role.UNDEFINED;
+    private String robotName = "Unknown";
     private State state = State.IDLE;
     private double myX, myY;
     private double targetAngle;
@@ -41,21 +42,53 @@ public class Robot extends Brain {
 
     @Override
     public void activate() {
-        role = Role.SEEKER;
+        // Determine role based on initial position
+        // Bot 1 (left side) = WARIO
+        // Bot 2 (center/right) = MARIO or LUIGI based on radar detection
+
+        boolean facingNorth = false;
         for (IRadarResult o : detectRadar())
             if (isSameDirection(o.getObjectDirection(), Parameters.NORTH)) {
-                role = Role.BEATER;
+                facingNorth = true;
                 break;
             }
 
-        if (role == Role.SEEKER) {
+        // Assign roles based on starting position
+        if (!facingNorth) {
+            // This is the leftmost bot
+            role = Role.WARIO;
+            robotName = "WARIO";
             myX = Parameters.teamAMainBot1InitX;
             myY = Parameters.teamAMainBot1InitY;
         } else {
+            // Check if there's another bot to our left to determine if we're MARIO or LUIGI
+            boolean botOnLeft = false;
+            for (IRadarResult o : detectRadar()) {
+                double relativeAngle = normalize(o.getObjectDirection() - myGetHeading());
+                // Check if teammate is on our left (270° or 3π/2)
+                if ((o.getObjectType() == IRadarResult.Types.TeamMainBot ||
+                        o.getObjectType() == IRadarResult.Types.TeamSecondaryBot) &&
+                        relativeAngle > Math.PI / 2 && relativeAngle < 3 * Math.PI / 2) {
+                    botOnLeft = true;
+                    break;
+                }
+            }
+
+            if (botOnLeft) {
+                // There's a bot on our left, so we're the rightmost = LUIGI
+                role = Role.LUIGI;
+                robotName = "LUIGI";
+            } else {
+                // We're in the middle = MARIO
+                role = Role.MARIO;
+                robotName = "MARIO";
+            }
+
             myX = Parameters.teamAMainBot2InitX;
             myY = Parameters.teamAMainBot2InitY;
         }
 
+        sendLogMessage("=== I AM " + robotName + "! ===");
         state = State.IDLE;
         isMoving = false;
         targetAngle = myGetHeading();
@@ -87,7 +120,7 @@ public class Robot extends Brain {
 
             case MOVE:
                 if (sharedEnemyX != -1 && !enemyCheck()) {
-                    sendLogMessage("Teammate spotted enemy! Converging on position.");
+                    sendLogMessage(robotName + ": Teammate spotted enemy! Converging on position.");
                     state = State.CONVERGING;
                     break;
                 }
@@ -197,7 +230,7 @@ public class Robot extends Brain {
                 }
             }
             fire(target.getObjectDirection());
-            sendLogMessage("Firing at enemy main bot at " + (int)target.getObjectDistance() + "mm");
+            sendLogMessage(robotName + " firing at enemy main bot at " + (int)target.getObjectDistance() + "mm");
             broadcastEnemyPosition(target);
 
         } else if (!enemiesScouts.isEmpty()) {
@@ -208,7 +241,7 @@ public class Robot extends Brain {
                 }
             }
             fire(target.getObjectDirection());
-            sendLogMessage("Firing at enemy secondary bot at " + (int)target.getObjectDistance() + "mm");
+            sendLogMessage(robotName + " firing at enemy secondary bot at " + (int)target.getObjectDistance() + "mm");
             broadcastEnemyPosition(target);
         }
     }
@@ -254,9 +287,10 @@ public class Robot extends Brain {
         double enemyAbsoluteX = myX + enemy.getObjectDistance() * Math.cos(enemy.getObjectDirection());
         double enemyAbsoluteY = myY + enemy.getObjectDistance() * Math.sin(enemy.getObjectDirection());
 
-        String message = "ENEMY_LOCATION|" + (int)enemyAbsoluteX + "|" + (int)enemyAbsoluteY;
+        // Broadcast with robot name so teammates know who spotted it
+        String message = "ENEMY_LOCATION|" + robotName + "|" + (int)enemyAbsoluteX + "|" + (int)enemyAbsoluteY;
         broadcast(message);
-        sendLogMessage("Broadcasting enemy at (" + (int)enemyAbsoluteX + "," + (int)enemyAbsoluteY + ")");
+        sendLogMessage(robotName + " broadcasting enemy at (" + (int)enemyAbsoluteX + "," + (int)enemyAbsoluteY + ")");
     }
 
     private void readTeammateMessages() {
@@ -266,15 +300,42 @@ public class Robot extends Brain {
             if (msg.startsWith("ENEMY_LOCATION|")) {
                 try {
                     String[] parts = msg.split("\\|");
-                    if (parts.length == 3) {
-                        sharedEnemyX = Double.parseDouble(parts[1]);
-                        sharedEnemyY = Double.parseDouble(parts[2]);
+                    if (parts.length == 4) {
+                        String spotter = parts[1];
+                        sharedEnemyX = Double.parseDouble(parts[2]);
+                        sharedEnemyY = Double.parseDouble(parts[3]);
                         stepsSinceEnemyUpdate = 0;
-                        sendLogMessage("Received enemy location: (" + (int)sharedEnemyX + "," + (int)sharedEnemyY + ")");
+
+                        // Adjust convergence strategy based on who we are and who spotted
+                        sendLogMessage(robotName + " received enemy from " + spotter + " at (" +
+                                (int)sharedEnemyX + "," + (int)sharedEnemyY + ")");
+
+                        // Strategic positioning based on roles
+                        adjustConvergenceStrategy(spotter);
                     }
                 } catch (Exception e) {
                     // Invalid message, ignore
                 }
+            }
+        }
+    }
+
+    private void adjustConvergenceStrategy(String spotter) {
+        // Strategic coordination based on character positions
+        // WARIO is on the left, MARIO in center, LUIGI on the right
+
+        if (robotName.equals("WARIO")) {
+            // Wario approaches from the left flank
+            if (spotter.equals("LUIGI")) {
+                sendLogMessage("WARIO: Luigi spotted enemy on right, flanking from left!");
+            }
+        } else if (robotName.equals("MARIO")) {
+            // Mario charges center
+            sendLogMessage("MARIO: Let's-a-go! Charging center!");
+        } else if (robotName.equals("LUIGI")) {
+            // Luigi approaches from the right flank
+            if (spotter.equals("WARIO")) {
+                sendLogMessage("LUIGI: Wario spotted enemy on left, flanking from right!");
             }
         }
     }
@@ -285,7 +346,7 @@ public class Robot extends Brain {
         double distance = Math.hypot(x - myX, y - myY);
 
         if (distance < precision) {
-            sendLogMessage(">>> Arrived at enemy location!");
+            sendLogMessage(robotName + " >>> Arrived at enemy location!");
             state = State.MOVE;
             return;
         }
@@ -301,7 +362,7 @@ public class Robot extends Brain {
 
         if (!obstacleCheck()) {
             myMove();
-            sendLogMessage(">>> Converging on enemy. Distance: " + (int)distance + "mm");
+            sendLogMessage(robotName + " >>> Converging on enemy. Distance: " + (int)distance + "mm");
         } else {
             state = State.BACKING_UP;
             backupSteps = 0;
@@ -309,13 +370,19 @@ public class Robot extends Brain {
     }
 
     private void handleTeammateEncounter() {
-        if (role == Role.SEEKER) {
+        // Priority based on character roles
+        // MARIO (center) has highest priority, WARIO and LUIGI yield
+        if (role == Role.MARIO) {
+            // Mario waits briefly
             state = State.WAITING;
             waitCounter = 0;
+            sendLogMessage("MARIO: Waiting for teammate to pass");
         } else {
+            // Wario and Luigi go around immediately
             state = State.BACKING_UP;
             backupSteps = 0;
             consecutiveBlocked++;
+            sendLogMessage(robotName + ": Going around teammate");
         }
     }
 
