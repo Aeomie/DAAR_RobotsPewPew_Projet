@@ -100,14 +100,6 @@ public class RobotScript extends Brain {
                 return;
 
             case MOVE:
-                if (moveCounter < MOVES_BEFORE_MEETING) {
-                    moveCounter++;
-                } else {
-                    if (!is_Going_MeetPoint && !meetingPointCompleted) {
-                        is_Going_MeetPoint = true;
-                    }
-                }
-
                 if (obstacleCheck()) {
                     state = State.TURN_RIGHT;
                     oldAngle = getHeading();

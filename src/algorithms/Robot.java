@@ -11,8 +11,9 @@ public class Robot extends Brain {
 
     private enum Role { BEATER, SEEKER, UNDEFINED }
     private enum State {
-        MOVE, TURNING, BACKING_UP, WAITING, ATTACKING, IDLE
+        MOVE, TURNING, BACKING_UP, WAITING, ATTACKING, CONVERGING, IDLE
     }
+
     //---VARIABLES---//
     private Role role = Role.UNDEFINED;
     private State state = State.IDLE;
@@ -25,6 +26,12 @@ public class Robot extends Brain {
     private static final double ANGLE_PRECISION = 0.1;
     private static final int MAX_BACKUP_STEPS = 3;
     private static final int MAX_WAIT_TIME = 5;
+
+    // --- SHARED ENEMY TRACKING ---
+    private double sharedEnemyX = -1;
+    private double sharedEnemyY = -1;
+    private int stepsSinceEnemyUpdate = 0;
+    private static final int ENEMY_INFO_EXPIRY = 20;
 
     // --- DETECTION RANGES ---
     private static final int ENEMY_DETECTION_DISTANCE = 400;
@@ -41,7 +48,6 @@ public class Robot extends Brain {
                 break;
             }
 
-        // Initialize position based on role
         if (role == Role.SEEKER) {
             myX = Parameters.teamAMainBot1InitX;
             myY = Parameters.teamAMainBot1InitY;
@@ -58,10 +64,19 @@ public class Robot extends Brain {
     @Override
     public void step() {
         updateOdometry();
+        readTeammateMessages();
 
-        // Check for enemies first - highest priority
         if (enemyCheck() && state != State.ATTACKING) {
             state = State.ATTACKING;
+        }
+
+        stepsSinceEnemyUpdate++;
+        if (stepsSinceEnemyUpdate > ENEMY_INFO_EXPIRY) {
+            sharedEnemyX = -1;
+            sharedEnemyY = -1;
+            if (state == State.CONVERGING) {
+                state = State.MOVE;
+            }
         }
 
         switch(state) {
@@ -71,7 +86,12 @@ public class Robot extends Brain {
                 break;
 
             case MOVE:
-                // Check for enemies while moving
+                if (sharedEnemyX != -1 && !enemyCheck()) {
+                    sendLogMessage("Teammate spotted enemy! Converging on position.");
+                    state = State.CONVERGING;
+                    break;
+                }
+
                 if (enemyCheck()) {
                     state = State.ATTACKING;
                     break;
@@ -81,15 +101,11 @@ public class Robot extends Brain {
                     myMove();
                     consecutiveBlocked = 0;
                 } else {
-                    // Check what type of obstacle
                     if (isBlockedByTeamMainBotOnly()) {
-                        // Main teammate blocking - try to coordinate
                         handleTeammateEncounter();
                     } else if (isBlockedBySecondaryBotOnly()) {
-                        // Secondary bot blocking - they're usually stationary, go around quickly
                         handleSecondaryBotEncounter();
                     } else {
-                        // Wall, wreck, or enemy - avoid normally
                         consecutiveBlocked++;
                         state = State.BACKING_UP;
                         backupSteps = 0;
@@ -97,11 +113,22 @@ public class Robot extends Brain {
                 }
                 break;
 
+            case CONVERGING:
+                if (sharedEnemyX != -1) {
+                    meetAtPoint(sharedEnemyX, sharedEnemyY, 100);
+                } else {
+                    state = State.MOVE;
+                }
+
+                if (enemyCheck()) {
+                    state = State.ATTACKING;
+                }
+                break;
+
             case ATTACKING:
                 if (enemyCheck()) {
                     shootEnemy();
                 } else {
-                    // No more enemies visible, return to movement
                     state = State.MOVE;
                 }
                 break;
@@ -109,12 +136,10 @@ public class Robot extends Brain {
             case WAITING:
                 waitCounter++;
                 if (waitCounter >= MAX_WAIT_TIME) {
-                    // Waited long enough, now actively avoid
                     state = State.BACKING_UP;
                     backupSteps = 0;
                     waitCounter = 0;
                 } else if (!isBlockedByTeamMainBotOnly()) {
-                    // Teammate moved, continue
                     state = State.MOVE;
                     waitCounter = 0;
                 }
@@ -125,7 +150,6 @@ public class Robot extends Brain {
                     moveBack();
                     backupSteps++;
                 } else {
-                    // Done backing up, now turn
                     state = State.TURNING;
                     targetAngle = calculateAvoidanceAngle();
                 }
@@ -133,10 +157,8 @@ public class Robot extends Brain {
 
             case TURNING:
                 if (isSameDirection(myGetHeading(), targetAngle)) {
-                    // Turn complete - try moving again
                     state = State.MOVE;
                 } else {
-                    // Continue turning
                     Parameters.Direction turnDir = getTurnDirection(myGetHeading(), targetAngle);
                     stepTurn(turnDir);
                 }
@@ -155,7 +177,6 @@ public class Robot extends Brain {
                     o.getObjectType() == IRadarResult.Types.OpponentSecondaryBot) &&
                     o.getObjectDistance() <= ENEMY_DETECTION_DISTANCE) {
 
-                // Check if wreck is blocking line of sight
                 if (isBlockedByWreck(o.getObjectDirection(), o.getObjectDistance())) {
                     continue;
                 }
@@ -168,7 +189,6 @@ public class Robot extends Brain {
             }
         }
 
-        // Prioritize main bots (shooters) over secondary bots (scouts)
         if (!enemiesShooters.isEmpty()) {
             IRadarResult target = enemiesShooters.get(0);
             for (IRadarResult enemy : enemiesShooters) {
@@ -178,6 +198,7 @@ public class Robot extends Brain {
             }
             fire(target.getObjectDirection());
             sendLogMessage("Firing at enemy main bot at " + (int)target.getObjectDistance() + "mm");
+            broadcastEnemyPosition(target);
 
         } else if (!enemiesScouts.isEmpty()) {
             IRadarResult target = enemiesScouts.get(0);
@@ -188,6 +209,7 @@ public class Robot extends Brain {
             }
             fire(target.getObjectDirection());
             sendLogMessage("Firing at enemy secondary bot at " + (int)target.getObjectDistance() + "mm");
+            broadcastEnemyPosition(target);
         }
     }
 
@@ -197,7 +219,6 @@ public class Robot extends Brain {
                     o.getObjectType() == IRadarResult.Types.OpponentSecondaryBot) &&
                     o.getObjectDistance() <= ENEMY_DETECTION_DISTANCE) {
 
-                // Don't count enemies blocked by wrecks
                 if (isBlockedByWreck(o.getObjectDirection(), o.getObjectDistance())) {
                     continue;
                 }
@@ -215,7 +236,6 @@ public class Robot extends Brain {
             if (wreck.getObjectType() == IRadarResult.Types.Wreck &&
                     wreck.getObjectDistance() < enemyDistance) {
 
-                // Calculate if wreck blocks the line of sight to enemy
                 double angularWidth = Math.atan(botRadius / wreck.getObjectDistance());
                 double angleDiff = Math.abs(normalize(wreck.getObjectDirection() - enemyDirection));
                 if (angleDiff > Math.PI) angleDiff = 2 * Math.PI - angleDiff;
@@ -228,16 +248,71 @@ public class Robot extends Brain {
         return false;
     }
 
+    // === COMMUNICATION METHODS === //
+
+    private void broadcastEnemyPosition(IRadarResult enemy) {
+        double enemyAbsoluteX = myX + enemy.getObjectDistance() * Math.cos(enemy.getObjectDirection());
+        double enemyAbsoluteY = myY + enemy.getObjectDistance() * Math.sin(enemy.getObjectDirection());
+
+        String message = "ENEMY_LOCATION|" + (int)enemyAbsoluteX + "|" + (int)enemyAbsoluteY;
+        broadcast(message);
+        sendLogMessage("Broadcasting enemy at (" + (int)enemyAbsoluteX + "," + (int)enemyAbsoluteY + ")");
+    }
+
+    private void readTeammateMessages() {
+        ArrayList<String> messages = fetchAllMessages();
+
+        for (String msg : messages) {
+            if (msg.startsWith("ENEMY_LOCATION|")) {
+                try {
+                    String[] parts = msg.split("\\|");
+                    if (parts.length == 3) {
+                        sharedEnemyX = Double.parseDouble(parts[1]);
+                        sharedEnemyY = Double.parseDouble(parts[2]);
+                        stepsSinceEnemyUpdate = 0;
+                        sendLogMessage("Received enemy location: (" + (int)sharedEnemyX + "," + (int)sharedEnemyY + ")");
+                    }
+                } catch (Exception e) {
+                    // Invalid message, ignore
+                }
+            }
+        }
+    }
+
     // === NAVIGATION METHODS === //
 
+    private void meetAtPoint(double x, double y, double precision) {
+        double distance = Math.hypot(x - myX, y - myY);
+
+        if (distance < precision) {
+            sendLogMessage(">>> Arrived at enemy location!");
+            state = State.MOVE;
+            return;
+        }
+
+        double angleToTarget = Math.atan2(y - myY, x - myX);
+
+        if (!isSameDirection(myGetHeading(), angleToTarget)) {
+            double diff = normalize(angleToTarget - myGetHeading());
+            Parameters.Direction dir = (diff < Math.PI) ? Parameters.Direction.RIGHT : Parameters.Direction.LEFT;
+            stepTurn(dir);
+            return;
+        }
+
+        if (!obstacleCheck()) {
+            myMove();
+            sendLogMessage(">>> Converging on enemy. Distance: " + (int)distance + "mm");
+        } else {
+            state = State.BACKING_UP;
+            backupSteps = 0;
+        }
+    }
+
     private void handleTeammateEncounter() {
-        // Use role-based priority: SEEKER has priority over BEATER
         if (role == Role.SEEKER) {
-            // Seeker waits briefly to let beater pass
             state = State.WAITING;
             waitCounter = 0;
         } else {
-            // Beater tries to go around immediately
             state = State.BACKING_UP;
             backupSteps = 0;
             consecutiveBlocked++;
@@ -245,8 +320,6 @@ public class Robot extends Brain {
     }
 
     private void handleSecondaryBotEncounter() {
-        // Secondary bots are usually stationary, so go around them immediately
-        // Don't wait - just back up and turn
         state = State.BACKING_UP;
         backupSteps = 0;
         consecutiveBlocked++;
@@ -254,15 +327,12 @@ public class Robot extends Brain {
 
     private double calculateAvoidanceAngle() {
         double currentHeading = myGetHeading();
-
-        // Find best escape direction by checking all obstacles
         boolean leftClear = true;
         boolean rightClear = true;
         int leftObstacles = 0;
         int rightObstacles = 0;
 
         for (IRadarResult o : detectRadar()) {
-            // Ignore obstacles behind us
             if (isBehind(o.getObjectDirection())) {
                 continue;
             }
@@ -271,7 +341,6 @@ public class Robot extends Brain {
                 double objDirection = o.getObjectDirection();
                 double relativeAngle = normalize(objDirection - currentHeading);
 
-                // Check if obstacle is on left or right
                 if (relativeAngle > 0 && relativeAngle < Math.PI) {
                     rightClear = false;
                     rightObstacles++;
@@ -282,7 +351,6 @@ public class Robot extends Brain {
             }
         }
 
-        // Choose turn direction based on what's clearer
         double turnAmount;
         if (leftClear && !rightClear) {
             turnAmount = Parameters.LEFTTURNFULLANGLE;
@@ -291,10 +359,8 @@ public class Robot extends Brain {
         } else if (leftObstacles < rightObstacles) {
             turnAmount = Parameters.LEFTTURNFULLANGLE;
         } else if (consecutiveBlocked > 3) {
-            // If blocked multiple times, make a larger turn
-            turnAmount = Math.PI; // U-turn
+            turnAmount = Math.PI;
         } else {
-            // Default: turn right
             turnAmount = Parameters.RIGHTTURNFULLANGLE;
         }
 
@@ -303,13 +369,7 @@ public class Robot extends Brain {
 
     private Parameters.Direction getTurnDirection(double current, double target) {
         double diff = normalize(target - current);
-
-        // Turn in the direction that requires less rotation
-        if (diff <= Math.PI) {
-            return Parameters.Direction.RIGHT;
-        } else {
-            return Parameters.Direction.LEFT;
-        }
+        return (diff <= Math.PI) ? Parameters.Direction.RIGHT : Parameters.Direction.LEFT;
     }
 
     private void updateOdometry() {
@@ -354,29 +414,24 @@ public class Robot extends Brain {
 
     private boolean isInFront(double objDir) {
         double relativeAngle = normalize(objDir - myGetHeading());
-        // Only consider objects in front (90° cone forward)
         return relativeAngle < Math.PI / 4 || relativeAngle > (2 * Math.PI - Math.PI / 4);
     }
 
     private boolean isBehind(double objDir) {
         double relativeAngle = normalize(objDir - myGetHeading());
-        // Objects behind (90° cone backward)
         return relativeAngle > (3 * Math.PI / 4) && relativeAngle < (5 * Math.PI / 4);
     }
 
     private boolean obstacleCheck() {
-        return detectWall() || isBlockedByWreckObstacle() || isBlockedByTeamMate()
-                || isBlockedByOpponent();
+        return detectWall() || isBlockedByWreckObstacle() || isBlockedByTeamMate() || isBlockedByOpponent();
     }
 
     private boolean isBlockedByTeamMainBotOnly() {
-        // Returns true ONLY if blocked by main teammate and nothing else
         return isBlockedByTeamMainBot() && !detectWall() && !isBlockedByWreckObstacle()
                 && !isBlockedBySecondaryBot() && !isBlockedByOpponent();
     }
 
     private boolean isBlockedBySecondaryBotOnly() {
-        // Returns true ONLY if blocked by secondary bot and nothing else
         return isBlockedBySecondaryBot() && !detectWall() && !isBlockedByWreckObstacle()
                 && !isBlockedByTeamMainBot() && !isBlockedByOpponent();
     }
