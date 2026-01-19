@@ -28,6 +28,7 @@ public class Robot extends Brain {
     private static final int ENEMY_DETECTION_DISTANCE = 100;
     private static final int WRECK_DETECTION_DISTANCE = 100;
     private static final int TEAMMATE_DETECTION_DISTANCE = 120;
+    private static final int SECONDARY_BOT_DETECTION_DISTANCE = 80;
 
     @Override
     public void activate() {
@@ -68,9 +69,12 @@ public class Robot extends Brain {
                     consecutiveBlocked = 0;
                 } else {
                     // Check what type of obstacle
-                    if (isBlockedByTeamMateOnly()) {
-                        // Teammate blocking - try to coordinate
+                    if (isBlockedByTeamMainBotOnly()) {
+                        // Main teammate blocking - try to coordinate
                         handleTeammateEncounter();
+                    } else if (isBlockedBySecondaryBotOnly()) {
+                        // Secondary bot blocking - they're usually stationary, go around quickly
+                        handleSecondaryBotEncounter();
                     } else {
                         // Wall, wreck, or enemy - avoid normally
                         consecutiveBlocked++;
@@ -87,7 +91,7 @@ public class Robot extends Brain {
                     state = State.BACKING_UP;
                     backupSteps = 0;
                     waitCounter = 0;
-                } else if (!isBlockedByTeamMateOnly()) {
+                } else if (!isBlockedByTeamMainBotOnly()) {
                     // Teammate moved, continue
                     state = State.MOVE;
                     waitCounter = 0;
@@ -132,6 +136,14 @@ public class Robot extends Brain {
         }
     }
 
+    private void handleSecondaryBotEncounter() {
+        // Secondary bots are usually stationary, so go around them immediately
+        // Don't wait - just back up and turn
+        state = State.BACKING_UP;
+        backupSteps = 0;
+        consecutiveBlocked++;
+    }
+
     private double calculateAvoidanceAngle() {
         double currentHeading = myGetHeading();
 
@@ -142,6 +154,11 @@ public class Robot extends Brain {
         int rightObstacles = 0;
 
         for (IRadarResult o : detectRadar()) {
+            // Ignore obstacles behind us
+            if (isBehind(o.getObjectDirection())) {
+                continue;
+            }
+
             if (o.getObjectDistance() <= 250) {
                 double objDirection = o.getObjectDirection();
                 double relativeAngle = normalize(objDirection - currentHeading);
@@ -228,16 +245,32 @@ public class Robot extends Brain {
     // ===== DETECTION FUNCTIONS =====
 
     private boolean isInFront(double objDir) {
-        return Math.abs(normalize(objDir - myGetHeading())) < Math.PI / 4; // 90° cone
+        double relativeAngle = normalize(objDir - myGetHeading());
+        // Only consider objects in front (90° cone forward)
+        return relativeAngle < Math.PI / 4 || relativeAngle > (2 * Math.PI - Math.PI / 4);
+    }
+
+    private boolean isBehind(double objDir) {
+        double relativeAngle = normalize(objDir - myGetHeading());
+        // Objects behind (90° cone backward)
+        return relativeAngle > (3 * Math.PI / 4) && relativeAngle < (5 * Math.PI / 4);
     }
 
     private boolean obstacleCheck() {
-        return detectWall() || isBlockedByWreck() || isBlockedByTeamMate() || isBlockedByOpponent();
+        return detectWall() || isBlockedByWreck() || isBlockedByTeamMate()
+                || isBlockedByOpponent();
     }
 
-    private boolean isBlockedByTeamMateOnly() {
-        // Returns true ONLY if blocked by teammate and nothing else
-        return isBlockedByTeamMate() && !detectWall() && !isBlockedByWreck() && !isBlockedByOpponent();
+    private boolean isBlockedByTeamMainBotOnly() {
+        // Returns true ONLY if blocked by main teammate and nothing else
+        return isBlockedByTeamMainBot() && !detectWall() && !isBlockedByWreck()
+                && !isBlockedBySecondaryBot() && !isBlockedByOpponent();
+    }
+
+    private boolean isBlockedBySecondaryBotOnly() {
+        // Returns true ONLY if blocked by secondary bot and nothing else
+        return isBlockedBySecondaryBot() && !detectWall() && !isBlockedByWreck()
+                && !isBlockedByTeamMainBot() && !isBlockedByOpponent();
     }
 
     private boolean detectWall() {
@@ -254,12 +287,28 @@ public class Robot extends Brain {
         return false;
     }
 
-    private boolean isBlockedByTeamMate() {
+    private boolean isBlockedByTeamMainBot() {
         for (IRadarResult o : detectRadar())
-            if ((o.getObjectType() == IRadarResult.Types.TeamMainBot
-                    || o.getObjectType() == IRadarResult.Types.TeamSecondaryBot)
+            if (o.getObjectType() == IRadarResult.Types.TeamMainBot
                     && isInFront(o.getObjectDirection())
+                    && !isBehind(o.getObjectDirection())
                     && o.getObjectDistance() < TEAMMATE_DETECTION_DISTANCE) {
+                return true;
+            }
+        return false;
+    }
+
+    private boolean isBlockedByTeamMate() {
+        return isBlockedByTeamMainBot() || isBlockedBySecondaryBot();
+    }
+
+    private boolean isBlockedBySecondaryBot() {
+        for (IRadarResult o : detectRadar())
+            if ((o.getObjectType() == IRadarResult.Types.TeamSecondaryBot
+                    || o.getObjectType() == IRadarResult.Types.OpponentSecondaryBot)
+                    && isInFront(o.getObjectDirection())
+                    && !isBehind(o.getObjectDirection())
+                    && o.getObjectDistance() < SECONDARY_BOT_DETECTION_DISTANCE) {
                 return true;
             }
         return false;
@@ -270,6 +319,7 @@ public class Robot extends Brain {
             if ((o.getObjectType() == IRadarResult.Types.OpponentMainBot
                     || o.getObjectType() == IRadarResult.Types.OpponentSecondaryBot)
                     && isInFront(o.getObjectDirection())
+                    && !isBehind(o.getObjectDirection())
                     && o.getObjectDistance() < ENEMY_DETECTION_DISTANCE) {
                 return true;
             }
