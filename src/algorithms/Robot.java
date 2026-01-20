@@ -28,6 +28,9 @@ public class Robot extends Brain {
     private static final int MAX_BACKUP_STEPS = 3;
     private static final int MAX_WAIT_TIME = 5;
 
+    // --- TACTICAL POSITIONING ---
+    private static final double FLANK_OFFSET_X = 150;  // Horizontal flanking distance
+    private static final double FLANK_OFFSET_Y = 100;  // Vertical positioning offset
     // --- SHARED ENEMY TRACKING ---
     private double sharedEnemyX = -1;
     private double sharedEnemyY = -1;
@@ -40,60 +43,65 @@ public class Robot extends Brain {
     private static final int TEAMMATE_DETECTION_DISTANCE = 120;
     private static final int SECONDARY_BOT_DETECTION_DISTANCE = 80;
 
+
+    // Map bounds discovered
+    private double northBound = -1;
+    private double westBound = -1;
+    private double eastBound = -1;
+    private double southBound = -1;
+
     @Override
     public void activate() {
         // Determine role based on initial position
         // Bot 1 (left side) = WARIO
         // Bot 2 (center/right) = MARIO or LUIGI based on radar detection
 
-        boolean facingNorth = false;
-        for (IRadarResult o : detectRadar())
-            if (isSameDirection(o.getObjectDirection(), Parameters.NORTH)) {
-                facingNorth = true;
-                break;
-            }
+        int botsAbove = 0;  // Teammates to the north
+        int botsBelow = 0;  // Teammates to the south
 
-        // Assign roles based on starting position
-        if (!facingNorth) {
-            // This is the leftmost bot
-            role = Role.WARIO;
-            robotName = "WARIO";
-            myX = Parameters.teamAMainBot1InitX;
-            myY = Parameters.teamAMainBot1InitY;
-        } else {
-            // Check if there's another bot to our left to determine if we're MARIO or LUIGI
-            boolean botOnLeft = false;
-            for (IRadarResult o : detectRadar()) {
+        for (IRadarResult o : detectRadar()) {
+            if (o.getObjectType() == IRadarResult.Types.TeamMainBot) {
                 double relativeAngle = normalize(o.getObjectDirection() - myGetHeading());
-                // Check if teammate is on our left (270° or 3π/2)
-                if ((o.getObjectType() == IRadarResult.Types.TeamMainBot ||
-                        o.getObjectType() == IRadarResult.Types.TeamSecondaryBot) &&
-                        relativeAngle > Math.PI / 2 && relativeAngle < 3 * Math.PI / 2) {
-                    botOnLeft = true;
-                    break;
+
+                // Check if teammate is above (north direction range: π/4 to 3π/4)
+                if (relativeAngle > Math.PI / 4 && relativeAngle < 3 * Math.PI / 4) {
+                    botsAbove++;
+                }
+                // Check if teammate is below (south direction range: 5π/4 to 7π/4)
+                else if (relativeAngle > 5 * Math.PI / 4 && relativeAngle < 7 * Math.PI / 4) {
+                    botsBelow++;
                 }
             }
-
-            if (botOnLeft) {
-                // There's a bot on our left, so we're the rightmost = LUIGI
-                role = Role.LUIGI;
-                robotName = "LUIGI";
-            } else {
-                // We're in the middle = MARIO
+        }
+        if(botsBelow >= botsAbove) {
+            if(botsBelow == botsAbove) {
+                // Mid bot
                 role = Role.MARIO;
                 robotName = "MARIO";
+                myX = Parameters.teamAMainBot2InitX;
+                myY = Parameters.teamAMainBot2InitY;
+
+            }else{
+                // Top Bot
+                role = Role.WARIO;
+                robotName = "WARIO";
+                myX = Parameters.teamAMainBot1InitX;
+                myY = Parameters.teamAMainBot1InitY;
+
             }
+        }else{
+            // Bottom Bot
+            role = Role.LUIGI;
+            robotName = "LUIGI";
+            myX = Parameters.teamAMainBot3InitX;
+            myY = Parameters.teamAMainBot3InitY;
 
-            myX = Parameters.teamAMainBot2InitX;
-            myY = Parameters.teamAMainBot2InitY;
         }
-
         sendLogMessage("=== I AM " + robotName + "! ===");
         state = State.IDLE;
         isMoving = false;
         targetAngle = myGetHeading();
     }
-
     @Override
     public void step() {
         updateOdometry();
@@ -287,10 +295,13 @@ public class Robot extends Brain {
         double enemyAbsoluteX = myX + enemy.getObjectDistance() * Math.cos(enemy.getObjectDirection());
         double enemyAbsoluteY = myY + enemy.getObjectDistance() * Math.sin(enemy.getObjectDirection());
 
-        // Broadcast with robot name so teammates know who spotted it
-        String message = "ENEMY_LOCATION|" + robotName + "|" + (int)enemyAbsoluteX + "|" + (int)enemyAbsoluteY;
+        // Broadcast both spotter position AND enemy position for smart convergence
+        String message = "ENEMY_LOCATION|" + robotName + "|" +
+                (int)myX + "|" + (int)myY + "|" +
+                (int)enemyAbsoluteX + "|" + (int)enemyAbsoluteY;
         broadcast(message);
-        sendLogMessage(robotName + " broadcasting enemy at (" + (int)enemyAbsoluteX + "," + (int)enemyAbsoluteY + ")");
+        sendLogMessage(robotName + " broadcasting: I'm at (" + (int)myX + "," + (int)myY +
+                "), enemy at (" + (int)enemyAbsoluteX + "," + (int)enemyAbsoluteY + ")");
     }
 
     private void readTeammateMessages() {
@@ -300,45 +311,91 @@ public class Robot extends Brain {
             if (msg.startsWith("ENEMY_LOCATION|")) {
                 try {
                     String[] parts = msg.split("\\|");
-                    if (parts.length == 4) {
+                    if (parts.length == 6) {
                         String spotter = parts[1];
-                        sharedEnemyX = Double.parseDouble(parts[2]);
-                        sharedEnemyY = Double.parseDouble(parts[3]);
+
+                        // Ignore our own messages
+                        if (robotName.equals(spotter)) {
+                            continue;
+                        }
+
+                        double spotterX = Double.parseDouble(parts[2]);
+                        double spotterY = Double.parseDouble(parts[3]);
+                        double enemyX = Double.parseDouble(parts[4]);
+                        double enemyY = Double.parseDouble(parts[5]);
                         stepsSinceEnemyUpdate = 0;
 
-                        // Adjust convergence strategy based on who we are and who spotted
-                        sendLogMessage(robotName + " received enemy from " + spotter + " at (" +
-                                (int)sharedEnemyX + "," + (int)sharedEnemyY + ")");
 
-                        // Strategic positioning based on roles
-                        adjustConvergenceStrategy(spotter);
+                        // Form up around the spotter's position
+                        applyFormationOffset(spotter, enemyX, enemyY);
+
+                        sendLogMessage(robotName + " received from " + spotter +
+                                " - Converging to (" + (int)sharedEnemyX + "," + (int)sharedEnemyY + ")");
                     }
                 } catch (Exception e) {
+                    // Invalid message, ignore
+                }
+            }
+            if (msg.startsWith("BORDER")){
+                try{
+                    String[] parts = msg.split("\\|");
+                    if (parts.length == 3) {
+                        String borderType = parts[1];
+                        String position = parts[2];
+                        Integer pos = Integer.parseInt(position);
+                        sendLogMessage(robotName + " received border info: " + borderType + " at " + pos);
+                        switch (borderType) {
+                            case "NORTH":
+                                northBound = pos;
+                                break;
+                            case "SOUTH":
+                                southBound = pos;
+                                break;
+                            case "WEST":
+                                westBound = pos;
+                                break;
+                            case "EAST":
+                                eastBound = pos;
+                                break;
+                        }
+                    }
+                }catch (Exception e) {
                     // Invalid message, ignore
                 }
             }
         }
     }
 
-    private void adjustConvergenceStrategy(String spotter) {
-        // Strategic coordination based on character positions
-        // WARIO is on the left, MARIO in center, LUIGI on the right
+    private void applyFormationOffset(String spotter, double targetX, double targetY) {
+        // Form up around the spotter maintaining formation order
+        // Calculate relative position: WARIO=-1, MARIO=0, LUIGI=1
 
-        if (robotName.equals("WARIO")) {
-            // Wario approaches from the left flank
-            if (spotter.equals("LUIGI")) {
-                sendLogMessage("WARIO: Luigi spotted enemy on right, flanking from left!");
-            }
-        } else if (robotName.equals("MARIO")) {
-            // Mario charges center
-            sendLogMessage("MARIO: Let's-a-go! Charging center!");
-        } else if (robotName.equals("LUIGI")) {
-            // Luigi approaches from the right flank
-            if (spotter.equals("WARIO")) {
-                sendLogMessage("LUIGI: Wario spotted enemy on left, flanking from right!");
-            }
+        int spotterPosition = getRolePosition(spotter);
+        int myPosition = getRolePosition(robotName);
+
+        // Calculate offset: difference in positions * FLANK_OFFSET_X
+        int relativeOffset = (myPosition - spotterPosition);
+
+        sharedEnemyX = targetX + (relativeOffset * FLANK_OFFSET_X);
+        sharedEnemyY = targetY;
+
+        sendLogMessage(robotName + ": Forming at offset " + relativeOffset + " from " + spotter);
+    }
+
+    private int getRolePosition(String name) {
+        // Return numeric position: WARIO=-1, MARIO=0, LUIGI=1
+        switch (name) {
+            case "WARIO":
+                return -1;
+            case "MARIO":
+                return 0;
+            case "LUIGI":
+                return 1;
+            default:
+                return 0;
         }
     }
+
 
     // === NAVIGATION METHODS === //
 
