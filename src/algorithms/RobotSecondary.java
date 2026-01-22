@@ -56,7 +56,21 @@ public class RobotSecondary extends Brain {
     private static final double ROAM_TURN_INCREMENT = Math.PI / 6; // 30°
     private int consecutiveBlocked = 0;
     private static final double ROAM_SCAN_DISTANCE = 250;
+    private boolean lastMoveWasBack = false;
+    private static final double ENEMY_MAINBOT_KEEP_DISTANCE = 300;
+    private static final int EVADE_BACK_STEPS = 8;
+    private int evadeEnemySteps = 0;
+    private double latchX = Double.NaN, latchY = Double.NaN;
+    private boolean wallLatchActive = false;
+    private boolean latchJustCompleted = false;
+    private double WALLOFFSET= 400;
 
+
+    private int enemyBroadcastCooldown = 0;
+    private static final int ENEMY_BROADCAST_PERIOD = 50; // 50 steps
+
+
+    private int maxDistance_Scanned = 0;
 
     @Override
     public void activate() {
@@ -112,7 +126,8 @@ public class RobotSecondary extends Brain {
     public void step() {
         updateOdometry();
         readTeammateMessages();
-
+        scanWhatever();
+        enemyBroadcastCooldown = Math.max(0, enemyBroadcastCooldown - 1);
         switch (state){
             case TURNING_NORTH:
                 if (isSameDirection(myGetHeading(), Parameters.NORTH)) {
@@ -124,10 +139,23 @@ public class RobotSecondary extends Brain {
 
             case GOING_NORTH:
                 if (detectWall()) {
-                    northBound = myY;
-                    broadcastBorders("NORTH");
-                    state = State.TURNING_EAST;
-                    targetAngle = Parameters.EAST;
+                    if (latchJustCompleted) {
+                        // We finished approaching this tick: turn now, don't re-latch
+                        latchJustCompleted = false;
+                        state = State.TURNING_WEST;
+                        targetAngle = Parameters.WEST;
+                        break;
+                    }
+
+                    if (!wallLatchActive) {
+                        // First time we see the wall → latch + broadcast once
+                        latchWallStart();
+                        northBound = myY;
+                        broadcastBorders("NORTH");
+                    }
+
+                    // Move toward the wall while latching
+                    myMove();
                 } else {
                     myMove();
                 }
@@ -143,15 +171,27 @@ public class RobotSecondary extends Brain {
 
             case CHECKING_SOUTH:
                 if (detectWall()) {
-                    southBound = myY;
-                    broadcastBorders("SOUTH");
-                    state = State.TURNING_WEST;
-                    targetAngle = Parameters.WEST;
+                    if (latchJustCompleted) {
+                        // We finished approaching this tick: turn now, don't re-latch
+                        latchJustCompleted = false;
+                        state = State.TURNING_EAST;
+                        targetAngle = Parameters.EAST;
+                        break;
+                    }
+
+                    if (!wallLatchActive) {
+                        // First time we see the wall → latch + broadcast once
+                        latchWallStart();
+                        northBound = myY;
+                        broadcastBorders("SOUTH");
+                    }
+
+                    // Move toward the wall while latching
+                    myMove();
                 } else {
                     myMove();
                 }
                 break;
-
             case TURNING_WEST:
                 if (isSameDirection(myGetHeading(), Parameters.WEST)) {
                     state = State.CHECKING_WEST;
@@ -164,8 +204,8 @@ public class RobotSecondary extends Brain {
                 if (detectWall()) {
                     westBound = myX;
                     broadcastBorders("WEST");
-                    state = State.TURNING_EAST;
-                    targetAngle = Parameters.EAST;
+                    /* Roamning normally after */
+                    state = State.EXPLORATION_COMPLETE;
                 } else {
                     myMove();
                 }
@@ -196,38 +236,61 @@ public class RobotSecondary extends Brain {
                 break;
 
             case MOVE:
-                // If we're currently yielding, keep backing up
+                // 0) Enemy main bot keep-out rule (HIGHEST PRIORITY)
+                if (evadeEnemySteps > 0) {
+                    myMoveBack();
+                    evadeEnemySteps--;
+                    break;
+                }
+                if (enemyMainBotTooClose()) {
+                    IRadarResult enemy = getClosestEnemyMainBot();
+
+                    if (enemyBroadcastCooldown == 0) {
+                        broadcastEnemyPosition(enemy); /* broadcast enemy position to team */
+                        enemyBroadcastCooldown = ENEMY_BROADCAST_PERIOD; /* reset cooldown */
+                    }
+                    // Back up first to quickly increase distance
+                    evadeEnemySteps = EVADE_BACK_STEPS;
+
+                    // Turn away so we don't keep facing it
+                    targetAngle = normalize(computeEvadeAngleFromEnemy(enemy));
+                    state = State.TURNING_BACK;
+                    break;
+                }
+
+                // 1) Yielding in progress (for allies)
                 if (yieldBackSteps > 0) {
                     myMoveBack();
                     yieldBackSteps--;
                     break;
                 }
 
-                // 1) Main bot priority (keep your existing logic)
+                // 2) Our main bot has priority
                 if (isBlockedByTeamMainBotOnlyFront()) {
                     yieldBackSteps = YIELD_BACK_STEPS_MAIN;
                     break;
                 }
 
-                // 2) Secondary-vs-secondary deadlock breaker
+                // 3) Secondary-vs-secondary deadlock breaker
                 if (isSecondaryBlockingFront()) {
                     if (role == Role.EXPLORER_ALPHA) {
-                        // Alpha yields by backing up a bit
+                        // Alpha yields by backing up
                         yieldBackSteps = YIELD_BACK_STEPS_SECONDARY;
                     } else {
-                        // Beta yields by turning away (breaks symmetry)
+                        // Beta yields by turning away
                         targetAngle = normalize(myGetHeading() + ROAM_TURN_INCREMENT);
                         state = State.TURNING_BACK;
                     }
                     break;
                 }
 
-                // Normal roam forward if free
+                // 4) Normal roaming
                 if (!blockedAhead()) {
                     myMove();
                     consecutiveBlocked = 0;
                 } else {
                     consecutiveBlocked++;
+
                     targetAngle = normalize(myGetHeading() + ROAM_TURN_INCREMENT);
 
                     if (consecutiveBlocked % 8 == 0) {
@@ -237,6 +300,7 @@ public class RobotSecondary extends Brain {
                         targetAngle = normalize(myGetHeading() + Math.PI);
                         consecutiveBlocked = 0;
                     }
+
                     state = State.TURNING_BACK;
                 }
                 break;
@@ -265,8 +329,16 @@ public class RobotSecondary extends Brain {
 
     private void myMove() {
         isMoving = true;
+        lastMoveWasBack = false;
         move();
     }
+
+    private void myMoveBack() {
+        isMoving = true;
+        lastMoveWasBack = true;
+        moveBack();
+    }
+
 
     private void updateOdometry() {
         boolean blockedByWall = detectWall();
@@ -276,11 +348,14 @@ public class RobotSecondary extends Brain {
 
         if (isMoving) {
             if (!blockedByWall && !blockedByWreck && !blockedByTeamMate && !blockedByOpponent) {
-                myX += Parameters.teamASecondaryBotSpeed * Math.cos(myGetHeading());
-                myY += Parameters.teamASecondaryBotSpeed * Math.sin(myGetHeading());
+                double s = Parameters.teamASecondaryBotSpeed;
+                if (lastMoveWasBack) s = -s;
+                myX += s * Math.cos(myGetHeading());
+                myY += s * Math.sin(myGetHeading());
             }
             isMoving = false;
         }
+
     }
 
     private boolean isSameDirection(double dir1, double dir2) {
@@ -299,48 +374,6 @@ public class RobotSecondary extends Brain {
         while (res < 0) res += 2 * Math.PI;
         while (res >= 2 * Math.PI) res -= 2 * Math.PI;
         return res;
-    }
-
-    // ---- Roaming turn decision ----
-    private double computeRoamTurnTarget() {
-        double h = myGetHeading();
-
-        // If a wall is detected in front, turn 90 degrees (or 180 if repeatedly blocked)
-        if (detectWall()) {
-            if (consecutiveBlocked > 2) return normalize(h + Math.PI);
-            return normalize(h + Parameters.RIGHTTURNFULLANGLE);
-        }
-
-        int left = 0;
-        int right = 0;
-
-        for (IRadarResult o : detectRadar()) {
-            if (o.getObjectDistance() > ROAM_SCAN_DISTANCE) continue;
-            if (!isObstacleType(o.getObjectType())) continue;
-
-            if (isInFront(o.getObjectDirection())) {
-                double rel = normalize(o.getObjectDirection() - h);
-                if (rel > 0 && rel < Math.PI) right++;
-                else left++;
-            }
-        }
-
-        // turn toward the "more open" side
-        if (left < right) return normalize(h + Parameters.LEFTTURNFULLANGLE);
-        if (right < left) return normalize(h + Parameters.RIGHTTURNFULLANGLE);
-
-        // tie-breaker: alternate
-        return (consecutiveBlocked % 2 == 0)
-                ? normalize(h + Parameters.RIGHTTURNFULLANGLE)
-                : normalize(h + Parameters.LEFTTURNFULLANGLE);
-    }
-
-    private boolean isObstacleType(IRadarResult.Types t) {
-        return t == IRadarResult.Types.Wreck
-                || t == IRadarResult.Types.TeamMainBot
-                || t == IRadarResult.Types.TeamSecondaryBot
-                || t == IRadarResult.Types.OpponentMainBot
-                || t == IRadarResult.Types.OpponentSecondaryBot;
     }
 
     /*
@@ -369,6 +402,19 @@ public class RobotSecondary extends Brain {
                 return;
         }
     }
+    private void broadcastEnemyPosition(IRadarResult enemy){
+        double enemyAbsoluteX = myX + enemy.getObjectDistance() * Math.cos(enemy.getObjectDirection());
+        double enemyAbsoluteY = myY + enemy.getObjectDistance() * Math.sin(enemy.getObjectDirection());
+
+        // Broadcast both spotter position AND enemy position for smart convergence
+        String message = "SCOUT_ENEMY_LOCATION|" + robotName + "|" +
+                (int)myX + "|" + (int)myY + "|" +
+                (int)enemyAbsoluteX + "|" + (int)enemyAbsoluteY;
+        broadcast(message);
+//        sendLogMessage(robotName + " broadcasting: I'm at (" + (int)myX + "," + (int)myY +
+//                "), enemy at (" + (int)enemyAbsoluteX + "," + (int)enemyAbsoluteY + ")");
+
+    }
 
     private void readTeammateMessages() {
         ArrayList<String> messages = fetchAllMessages();
@@ -380,7 +426,7 @@ public class RobotSecondary extends Brain {
                         String borderType = parts[1];
                         String position = parts[2];
                         Integer pos = Integer.parseInt(position);
-                        sendLogMessage(robotName + " received border info: " + borderType + " at " + pos);
+//                        sendLogMessage(robotName + " received border info: " + borderType + " at " + pos);
                         switch (borderType) {
                             case "NORTH":
                                 northBound = pos;
@@ -407,6 +453,15 @@ public class RobotSecondary extends Brain {
     DETECTION FUNCTIONS
      */
     private boolean detectWall() {
+        if (wallLatchActive) {
+            double traveled = dist(myX, myY, latchX, latchY);
+            if (traveled >= WALLOFFSET) {
+                wallLatchActive = false;
+                latchJustCompleted = true;   // <- mark completion
+                return true;
+            }
+            return false;
+        }
         return detectFront().getObjectType() == IFrontSensorResult.Types.WALL;
     }
 
@@ -442,7 +497,26 @@ public class RobotSecondary extends Brain {
             }
         return false;
     }
+    private void scanWhatever(){
+        int max = 0;
+        IRadarResult.Types typescanned = null;
+        for (IRadarResult o : detectRadar()){
+            if (o.getObjectDistance() > max){
+                max = (int) o.getObjectDistance();
+                typescanned = o.getObjectType();
+            }
 
+            // Just scanning everything, no action taken
+//            sendLogMessage("Scanned object: Type=" + o.getObjectType() +
+//                    ", Distance=" + o.getObjectDistance() +
+//                    ", Direction=" + o.getObjectDirection());
+        }
+        if(max > maxDistance_Scanned){
+            maxDistance_Scanned = max;
+        }
+        sendLogMessage(("Farthest object distance so far: " + maxDistance_Scanned +
+                ", Type=" + typescanned));
+    }
     private boolean isBlockedByOpponent() {
         for (IRadarResult o : detectRadar())
             if ((o.getObjectType() == IRadarResult.Types.OpponentMainBot
@@ -482,10 +556,6 @@ public class RobotSecondary extends Brain {
         }
         return false;
     }
-    private void myMoveBack() {
-        isMoving = true;
-        moveBack();
-    }
 
     private boolean isBlockedByWreckObstacle() {
         for (IRadarResult o : detectRadar())
@@ -506,6 +576,49 @@ public class RobotSecondary extends Brain {
             }
         }
         return false;
+    }
+
+    private IRadarResult getClosestEnemyMainBot() {
+        IRadarResult best = null;
+        double bestD = Double.POSITIVE_INFINITY;
+
+        for (IRadarResult o : detectRadar()) {
+            if (o.getObjectType() == IRadarResult.Types.OpponentMainBot) {
+                double d = o.getObjectDistance();
+                if (d < bestD) {
+                    bestD = d;
+                    best = o;
+                }
+            }
+        }
+        return best;
+    }
+
+    private boolean enemyMainBotTooClose() {
+        IRadarResult e = getClosestEnemyMainBot();
+        return e != null && e.getObjectDistance() < ENEMY_MAINBOT_KEEP_DISTANCE;
+    }
+    private double computeEvadeAngleFromEnemy(IRadarResult enemy) {
+        // We want to face away from the enemy.
+        // If enemy direction is absolute, desired heading is enemyDir + PI.
+        // If it's relative, this still works reasonably since you normalize with heading elsewhere.
+        return normalize(enemy.getObjectDirection() + Math.PI);
+    }
+
+
+    /*
+    UTILITY FUNCTIONS
+
+     */
+    private double dist(double x1, double y1, double x2, double y2) {
+        double dx = x1 - x2, dy = y1 - y2;
+        return Math.sqrt(dx*dx + dy*dy);
+    }
+
+    private void latchWallStart() {
+        latchX = myX;
+        latchY = myY;
+        wallLatchActive = true;
     }
 
 
