@@ -57,7 +57,7 @@ public class RobotSecondary extends Brain {
     private int consecutiveBlocked = 0;
     private static final double ROAM_SCAN_DISTANCE = 250;
     private boolean lastMoveWasBack = false;
-    private static final double ENEMY_MAINBOT_KEEP_DISTANCE = 300;
+    private static final double ENEMY_MAINBOT_KEEP_DISTANCE = 400; // 550 is scan for Secondary, 350 for Main , so a bit more than main
     private static final int EVADE_BACK_STEPS = 8;
     private int evadeEnemySteps = 0;
     private double latchX = Double.NaN, latchY = Double.NaN;
@@ -71,14 +71,18 @@ public class RobotSecondary extends Brain {
     private double mateX, mateY;
     private int teammateScanCooldown = 0;
     private static final int TEAMMATE_SCAN_PERIOD = 50; // 50 steps
-    private int DAMAGE_TAKEN_COOLDOWN = 100;
-
+    private static int DAMAGE_TAKEN_COOLDOWN = 100;
+    private int damageTakenCooldown = 0;
     private double lastHealth = -1;
 
     // “go back to main bot” mode after taking damage
     private boolean retreatToMate = false;
     private int retreatCooldown = 0;
     private static final int RETREAT_COOLDOWN_STEPS = 80; // how long we try to retreat
+    private static double retreatMateDistance = 200;
+    private static double retreatDefaultX = 0;
+    private static double retreatDefaultY = 0;
+    private static double mateDistance = 0;
 
     // optional: don’t retreat if we’ve never seen the mate yet
     private boolean hasMatePos = false;
@@ -111,6 +115,8 @@ public class RobotSecondary extends Brain {
         myX = Parameters.teamASecondaryBot1InitX;
         myY = Parameters.teamASecondaryBot1InitY;
 
+        retreatDefaultX = (Parameters.teamASecondaryBot1InitX + Parameters.teamASecondaryBot2InitX) / 2;
+        retreatDefaultY = (Parameters.teamASecondaryBot1InitY + Parameters.teamASecondaryBot2InitY) / 2;
         if (botsAbove == 0 && botsBelow == 1) {
             // Bottom position
             role = Role.EXPLORER_ALPHA;
@@ -132,6 +138,7 @@ public class RobotSecondary extends Brain {
         isMoving = false;
         lastHealth = getHealth();
         consecutiveBlocked = 0;
+        damageTakenCooldown = DAMAGE_TAKEN_COOLDOWN;
     }
 
     @Override
@@ -140,7 +147,7 @@ public class RobotSecondary extends Brain {
         readTeammateMessages();
         enemyBroadcastCooldown = Math.max(0, enemyBroadcastCooldown - 1);
         teammateScanCooldown = Math.max(0, teammateScanCooldown - 1);
-        DAMAGE_TAKEN_COOLDOWN = Math.max(0 , DAMAGE_TAKEN_COOLDOWN - 1);
+        damageTakenCooldown = Math.max(0 , damageTakenCooldown - 1);
 
         if (teammateScanCooldown == 0) {
             scanTeamMates();
@@ -152,7 +159,11 @@ public class RobotSecondary extends Brain {
 // If retreating, do it with priority
         if (retreatToMate) {
             retreatCooldown--;
-            meetAtPoint(mateX, mateY, 100); // precision in mm (120 is reasonable)
+            if(mateDistance > retreatMateDistance){
+                meetAtPoint(mateX, mateY, 100); // precision in mm (120 is reasonable)
+            }else{
+                meetAtPoint(retreatDefaultX, retreatDefaultY, 100);
+            }
             if (retreatCooldown <= 0) retreatToMate = false;
             return;
         }
@@ -396,10 +407,11 @@ public class RobotSecondary extends Brain {
         if (lastHealth < 0) lastHealth = h;
 
         // only trigger on DAMAGE (health goes down)
-        if (h < lastHealth) {
+        if (h < lastHealth && damageTakenCooldown == 0) {
             if (hasMatePos) {
                 retreatToMate = true;
                 retreatCooldown = RETREAT_COOLDOWN_STEPS;
+                damageTakenCooldown = DAMAGE_TAKEN_COOLDOWN;
             }
         }
 
@@ -529,7 +541,7 @@ public class RobotSecondary extends Brain {
                 if (d < bestD) {
                     bestD = d;
                     found = true;
-
+                    mateDistance = o.getObjectDistance();
                     // This simplifies to using absolute direction:
                     double dir = o.getObjectDirection();
                     bestX = myX + d * Math.cos(dir);
