@@ -161,7 +161,7 @@ public class Stage7MainA extends Brain {
       myMove();
       return;
     }
-
+    
 
 
     if (state==0xB52){

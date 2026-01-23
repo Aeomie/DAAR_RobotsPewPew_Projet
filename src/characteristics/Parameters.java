@@ -18,8 +18,6 @@ public class Parameters {
                              RIGHTTURNFULLANGLE = 0.5*Math.PI, //value set according to screen pixel coordinate reference
                              LEFTTURNFULLANGLE = -0.5*Math.PI;
 
-  public static final double STAGEWIDTH = 3000,
-		  					STAGEHEIGHT = 2000;
   //-----------------------//
   //---TEAM-A-PARAMETERS---//
   //-----------------------//
@@ -61,7 +59,7 @@ public class Parameters {
   //---TEAM-B-PARAMETERS---//
   //-----------------------//
   public static final String teamBName = "Fantom Danger";
-  public static final String teamBMainBotBrainClassName = "algorithms.Stage4SecondaryA"; //class given by name; is supposed to extends robotsimulator.Brain
+  public static final String teamBMainBotBrainClassName = "algorithms.CampFire"; //class given by name; is supposed to extends robotsimulator.Brain
   public static final String teamBMainBotAvatar = "avatars/hollowee.png"; //path relative to location of ant build.xml file
   public static final double teamBMainBotRadius = 50, //1 unit = 1mm, body radius
                              teamBMainBotFrontalDetectionRange = 300, //1 unit = 1mm, range of frontal sensor

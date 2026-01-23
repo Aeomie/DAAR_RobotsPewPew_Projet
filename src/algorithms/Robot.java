@@ -11,7 +11,7 @@ public class Robot extends Brain {
 
     private enum Role { WARIO, MARIO, LUIGI, UNDEFINED }
     private enum State {
-        MOVE, TURNING, BACKING_UP, WAITING, ATTACKING, CONVERGING, IDLE
+        MOVE, TURNING, BACKING_UP, WAITING, ATTACKING, CONVERGING, IDLE, STOPPED
     }
 
     //---VARIABLES---//
@@ -44,13 +44,16 @@ public class Robot extends Brain {
     private static final int SECONDARY_BOT_DETECTION_DISTANCE = 80;
 
 
+    // STOPPED TIME
+    private static final int STOPPED_TIME = 2000;
+    private int noEnemySignalCooldown = 0;
+
     // Map bounds discovered
     private double northBound = -1;
     private double westBound = -1;
     private double eastBound = -1;
     private double southBound = -1;
 
-    private int maxDistance_Scanned = 0;
     @Override
     public void activate() {
         // Determine role based on initial position
@@ -99,15 +102,16 @@ public class Robot extends Brain {
 
         }
         sendLogMessage("=== I AM " + robotName + "! ===");
-        state = State.IDLE;
+//        state = State.IDLE;
+        state = State.STOPPED;
         isMoving = false;
         targetAngle = myGetHeading();
+        noEnemySignalCooldown = STOPPED_TIME;
     }
     @Override
     public void step() {
         updateOdometry();
         readTeammateMessages();
-        scanWhatever();
         if (enemyCheck() && state != State.ATTACKING) {
             state = State.ATTACKING;
         }
@@ -120,8 +124,27 @@ public class Robot extends Brain {
                 state = State.MOVE;
             }
         }
-
+        noEnemySignalCooldown = Math.max(0, noEnemySignalCooldown - 1);
         switch(state) {
+            case STOPPED:
+                // If we received enemy info from a teammate -> react immediately
+                if (sharedEnemyX != -1) {
+                    state = State.CONVERGING;
+                    break;
+                }
+
+                // Passive defense
+                if (enemyCheck()) {
+                    state = State.ATTACKING;
+                    break;
+                }
+
+                // Timeout -> resume exploration
+                if (noEnemySignalCooldown == 0) {
+                    state = State.MOVE;
+                }
+                break;
+
             case IDLE:
                 state = State.MOVE;
                 consecutiveBlocked = 0;
@@ -305,26 +328,6 @@ public class Robot extends Brain {
                 "), enemy at (" + (int)enemyAbsoluteX + "," + (int)enemyAbsoluteY + ")");
     }
 
-    private void scanWhatever(){
-        int max = 0;
-        IRadarResult.Types typescanned = null;
-        for (IRadarResult o : detectRadar()){
-            if (o.getObjectDistance() > max){
-                max = (int) o.getObjectDistance();
-                typescanned = o.getObjectType();
-            }
-
-            // Just scanning everything, no action taken
-//            sendLogMessage("Scanned object: Type=" + o.getObjectType() +
-//                    ", Distance=" + o.getObjectDistance() +
-//                    ", Direction=" + o.getObjectDirection());
-        }
-        if(max > maxDistance_Scanned){
-            maxDistance_Scanned = max;
-        }
-        sendLogMessage(("Farthest object distance so far: " + maxDistance_Scanned +
-                ", Type=" + typescanned));
-    }
     private void readTeammateMessages() {
         ArrayList<String> messages = fetchAllMessages();
 
@@ -384,6 +387,28 @@ public class Robot extends Brain {
                     // Invalid message, ignore
                 }
             }
+            if(msg.startsWith("SCOUT_ENEMY_LOCATION")) {
+                try {
+                    String[] parts = msg.split("\\|");
+                    if (parts.length == 6) {
+                        String spotter = parts[1];
+
+
+                        double spotterX = Double.parseDouble(parts[2]);
+                        double spotterY = Double.parseDouble(parts[3]);
+                        double enemyX = Double.parseDouble(parts[4]);
+                        double enemyY = Double.parseDouble(parts[5]);
+                        stepsSinceEnemyUpdate = 0;
+
+                        applyFormationOffset(spotter, enemyX, enemyY);
+                        sendLogMessage(robotName + " received from " + spotter +
+                                " - Converging to (" + (int)sharedEnemyX + "," + (int)sharedEnemyY + ")");
+                    }
+                }catch (Exception e) {
+                    // Invalid message, ignore
+                }
+            }
+
         }
     }
 

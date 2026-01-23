@@ -68,9 +68,20 @@ public class RobotSecondary extends Brain {
 
     private int enemyBroadcastCooldown = 0;
     private static final int ENEMY_BROADCAST_PERIOD = 50; // 50 steps
+    private double mateX, mateY;
+    private int teammateScanCooldown = 0;
+    private static final int TEAMMATE_SCAN_PERIOD = 50; // 50 steps
+    private int DAMAGE_TAKEN_COOLDOWN = 100;
 
+    private double lastHealth = -1;
 
-    private int maxDistance_Scanned = 0;
+    // “go back to main bot” mode after taking damage
+    private boolean retreatToMate = false;
+    private int retreatCooldown = 0;
+    private static final int RETREAT_COOLDOWN_STEPS = 80; // how long we try to retreat
+
+    // optional: don’t retreat if we’ve never seen the mate yet
+    private boolean hasMatePos = false;
 
     @Override
     public void activate() {
@@ -119,6 +130,7 @@ public class RobotSecondary extends Brain {
         }
 
         isMoving = false;
+        lastHealth = getHealth();
         consecutiveBlocked = 0;
     }
 
@@ -126,8 +138,26 @@ public class RobotSecondary extends Brain {
     public void step() {
         updateOdometry();
         readTeammateMessages();
-        scanWhatever();
         enemyBroadcastCooldown = Math.max(0, enemyBroadcastCooldown - 1);
+        teammateScanCooldown = Math.max(0, teammateScanCooldown - 1);
+        DAMAGE_TAKEN_COOLDOWN = Math.max(0 , DAMAGE_TAKEN_COOLDOWN - 1);
+
+        if (teammateScanCooldown == 0) {
+            scanTeamMates();
+            teammateScanCooldown = TEAMMATE_SCAN_PERIOD;
+        }
+
+        damageTakenCheck();
+
+// If retreating, do it with priority
+        if (retreatToMate) {
+            retreatCooldown--;
+            meetAtPoint(mateX, mateY, 100); // precision in mm (120 is reasonable)
+            if (retreatCooldown <= 0) retreatToMate = false;
+            return;
+        }
+
+
         switch (state){
             case TURNING_NORTH:
                 if (isSameDirection(myGetHeading(), Parameters.NORTH)) {
@@ -236,24 +266,26 @@ public class RobotSecondary extends Brain {
                 break;
 
             case MOVE:
-                // 0) Enemy main bot keep-out rule (HIGHEST PRIORITY)
+                // 0) Enemy panic-back already in progress (HIGHEST PRIORITY)
                 if (evadeEnemySteps > 0) {
                     myMoveBack();
                     evadeEnemySteps--;
                     break;
                 }
-                if (enemyMainBotTooClose()) {
-                    IRadarResult enemy = getClosestEnemyMainBot();
 
-                    if (enemyBroadcastCooldown == 0) {
-                        broadcastEnemyPosition(enemy); /* broadcast enemy position to team */
-                        enemyBroadcastCooldown = ENEMY_BROADCAST_PERIOD; /* reset cooldown */
-                    }
-                    // Back up first to quickly increase distance
+                // Detect any enemy via radar
+                IRadarResult enemy = getFirstEnemy();
+
+                // A) If enemy visible -> broadcast (cooldown protected)
+                if (enemy != null && enemyBroadcastCooldown == 0) {
+                    broadcastEnemyPosition(enemy);
+                    enemyBroadcastCooldown = ENEMY_BROADCAST_PERIOD;
+                }
+
+                // B) If enemy too close -> run away
+                if (enemy != null && enemy.getObjectDistance() < ENEMY_MAINBOT_KEEP_DISTANCE) {
                     evadeEnemySteps = EVADE_BACK_STEPS;
-
-                    // Turn away so we don't keep facing it
-                    targetAngle = normalize(computeEvadeAngleFromEnemy(enemy));
+                    targetAngle = normalize(enemy.getObjectDirection() + Math.PI);
                     state = State.TURNING_BACK;
                     break;
                 }
@@ -274,10 +306,8 @@ public class RobotSecondary extends Brain {
                 // 3) Secondary-vs-secondary deadlock breaker
                 if (isSecondaryBlockingFront()) {
                     if (role == Role.EXPLORER_ALPHA) {
-                        // Alpha yields by backing up
                         yieldBackSteps = YIELD_BACK_STEPS_SECONDARY;
                     } else {
-                        // Beta yields by turning away
                         targetAngle = normalize(myGetHeading() + ROAM_TURN_INCREMENT);
                         state = State.TURNING_BACK;
                     }
@@ -361,6 +391,20 @@ public class RobotSecondary extends Brain {
     private boolean isSameDirection(double dir1, double dir2) {
         return Math.abs(normalize(dir1) - normalize(dir2)) < ANGLE_PRECISION;
     }
+    private void damageTakenCheck() {
+        double h = getHealth();
+        if (lastHealth < 0) lastHealth = h;
+
+        // only trigger on DAMAGE (health goes down)
+        if (h < lastHealth) {
+            if (hasMatePos) {
+                retreatToMate = true;
+                retreatCooldown = RETREAT_COOLDOWN_STEPS;
+            }
+        }
+
+        lastHealth = h;
+    }
 
     private double myGetHeading() {
         double result = getHeading();
@@ -411,8 +455,8 @@ public class RobotSecondary extends Brain {
                 (int)myX + "|" + (int)myY + "|" +
                 (int)enemyAbsoluteX + "|" + (int)enemyAbsoluteY;
         broadcast(message);
-//        sendLogMessage(robotName + " broadcasting: I'm at (" + (int)myX + "," + (int)myY +
-//                "), enemy at (" + (int)enemyAbsoluteX + "," + (int)enemyAbsoluteY + ")");
+        sendLogMessage(robotName + " broadcasting: I'm at (" + (int)myX + "," + (int)myY +
+                "), enemy at (" + (int)enemyAbsoluteX + "," + (int)enemyAbsoluteY + ")");
 
     }
 
@@ -448,6 +492,60 @@ public class RobotSecondary extends Brain {
             }
         }
     }
+    private void meetAtPoint(double x, double y, double precision) {
+        double distance = Math.hypot(x - myX, y - myY);
+
+        if (distance < precision) {
+            retreatToMate = false; // arrived
+            state = State.MOVE;
+            return;
+        }
+
+        double angleToTarget = Math.atan2(y - myY, x - myX);
+
+        if (!isSameDirection(myGetHeading(), angleToTarget)) {
+            Parameters.Direction dir = getTurnDirection(myGetHeading(), angleToTarget);
+            stepTurn(dir);
+            return;
+        }
+
+        // Move if possible; if blocked, just do your roam-turn behavior
+        if (!blockedAhead()) {
+            myMove();
+        } else {
+            targetAngle = normalize(myGetHeading() + ROAM_TURN_INCREMENT);
+            state = State.TURNING_BACK;
+        }
+    }
+
+    private void scanTeamMates() {
+        double bestD = Double.POSITIVE_INFINITY;
+        double bestX = mateX, bestY = mateY;
+        boolean found = false;
+
+        for (IRadarResult o : detectRadar()) {
+            if (o.getObjectType() == IRadarResult.Types.TeamMainBot) {
+                double d = o.getObjectDistance();
+                if (d < bestD) {
+                    bestD = d;
+                    found = true;
+
+                    // This simplifies to using absolute direction:
+                    double dir = o.getObjectDirection();
+                    bestX = myX + d * Math.cos(dir);
+                    bestY = myY + d * Math.sin(dir);
+                }
+            }
+        }
+
+        if (found) {
+            mateX = bestX;
+            mateY = bestY;
+            hasMatePos = true;
+        }
+    }
+
+
 
     /*
     DETECTION FUNCTIONS
@@ -497,26 +595,7 @@ public class RobotSecondary extends Brain {
             }
         return false;
     }
-    private void scanWhatever(){
-        int max = 0;
-        IRadarResult.Types typescanned = null;
-        for (IRadarResult o : detectRadar()){
-            if (o.getObjectDistance() > max){
-                max = (int) o.getObjectDistance();
-                typescanned = o.getObjectType();
-            }
 
-            // Just scanning everything, no action taken
-//            sendLogMessage("Scanned object: Type=" + o.getObjectType() +
-//                    ", Distance=" + o.getObjectDistance() +
-//                    ", Direction=" + o.getObjectDirection());
-        }
-        if(max > maxDistance_Scanned){
-            maxDistance_Scanned = max;
-        }
-        sendLogMessage(("Farthest object distance so far: " + maxDistance_Scanned +
-                ", Type=" + typescanned));
-    }
     private boolean isBlockedByOpponent() {
         for (IRadarResult o : detectRadar())
             if ((o.getObjectType() == IRadarResult.Types.OpponentMainBot
@@ -619,6 +698,16 @@ public class RobotSecondary extends Brain {
         latchX = myX;
         latchY = myY;
         wallLatchActive = true;
+    }
+
+    private IRadarResult getFirstEnemy() {
+        for (IRadarResult o : detectRadar()) {
+            if (o.getObjectType() == IRadarResult.Types.OpponentMainBot
+                    || o.getObjectType() == IRadarResult.Types.OpponentSecondaryBot) {
+                return o;
+            }
+        }
+        return null;
     }
 
 
