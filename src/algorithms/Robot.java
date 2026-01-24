@@ -7,7 +7,9 @@ import robotsimulator.Brain;
 
 import java.util.ArrayList;
 
+
 public class Robot extends Brain {
+
 
     private enum Role { WARIO, MARIO, LUIGI, UNDEFINED }
     private enum State {
@@ -74,6 +76,13 @@ public class Robot extends Brain {
 
     private static final int AVOID_BACK_STEPS = 5;      // tweak 3–8
     private static final int AVOID_FORWARD_STEPS = 10;  // tweak 6–15
+    // --- WRECK MEMORY ---
+    private static class WreckInfo {
+        double x, y;
+        WreckInfo(double x, double y) { this.x = x; this.y = y; }
+    }
+    private final ArrayList<WreckInfo> knownWrecks = new ArrayList<>();
+    private static final double WRECK_SAME_POS_EPS = 25.0; // tweak 10–40
 
     @Override
     public void activate() {
@@ -131,11 +140,15 @@ public class Robot extends Brain {
         backupSteps = 0;
         consecutiveBlocked = 0;
         waitCounter = 0;
+
+        knownWrecks.clear();
+
     }
 
     @Override
     public void step() {
         updateOdometry();
+        rememberWrecks();
         readTeammateMessages();
 
         // if sees enemy, attack
@@ -628,4 +641,29 @@ public class Robot extends Brain {
         }
         return false;
     }
+
+    private void rememberWrecks() {
+        for (IRadarResult o : detectRadar()) {
+            if (o.getObjectType() != IRadarResult.Types.Wreck) continue;
+
+            // Convert radar polar -> absolute world coordinates
+            double wx = myX + o.getObjectDistance() * Math.cos(o.getObjectDirection());
+            double wy = myY + o.getObjectDistance() * Math.sin(o.getObjectDirection());
+
+            // Check if already known (with tolerance)
+            boolean alreadyKnown = false;
+            for (WreckInfo w : knownWrecks) {
+                if (Math.hypot(w.x - wx, w.y - wy) <= WRECK_SAME_POS_EPS) {
+                    alreadyKnown = true;
+                    break;
+                }
+            }
+
+            if (!alreadyKnown) {
+                knownWrecks.add(new WreckInfo(wx, wy));
+                sendLogMessage(robotName + " memorized wreck at (" + (int) wx + ", " + (int) wy + ")  total=" + knownWrecks.size());
+            }
+        }
+    }
+
 }
