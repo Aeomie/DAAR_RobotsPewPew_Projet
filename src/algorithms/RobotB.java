@@ -57,7 +57,7 @@ public class RobotB extends Brain {
     private static final int SECONDARY_BOT_DETECTION_DISTANCE = 80;
 
     // STOPPED TIME
-    private static final int STOPPED_TIME = 5000;
+    private static final int STOPPED_TIME = 300;
     private int noEnemySignalCooldown = 0;
 
     // Map bounds discovered (kept for your existing comms)
@@ -68,6 +68,7 @@ public class RobotB extends Brain {
 
     private double DEFAULTX = 0;
     private double DEFAULTY = 0;
+
     // --- AVOIDANCE MEMORY ---
     private State resumeState = State.MOVE;     // where to go back after avoiding
     private double resumeX = -1, resumeY = -1;  // goal to continue (for converging)
@@ -78,6 +79,10 @@ public class RobotB extends Brain {
 
     private static final int AVOID_BACK_STEPS = 5;      // tweak 3–8
     private static final int AVOID_FORWARD_STEPS = 10;  // tweak 6–15
+
+    // ✅ NEW: Flag to skip obstacle avoidance for special cases
+    private boolean skipObstacleAvoidance = false;
+
     // --- WRECK MEMORY ---
     private static class WreckInfo {
         double x, y;
@@ -144,6 +149,7 @@ public class RobotB extends Brain {
         backupSteps = 0;
         consecutiveBlocked = 0;
         waitCounter = 0;
+        skipObstacleAvoidance = false;
 
         knownWrecks.clear();
 
@@ -191,20 +197,13 @@ public class RobotB extends Brain {
 
                 if (enemyCheck()) { state = State.ATTACKING; break; }
 
-                if (!obstacleCheck()) {
-                    myMove();
-                    consecutiveBlocked = 0;
-                } else {
-                    consecutiveBlocked++;
-
-                    // global avoidance: don't bump-loop
-                    startAvoiding(State.MOVE, -1, -1, 0);
-                }
+                // ✅ NOW OBSTACLES ARE ALWAYS CHECKED INSIDE moveWithObstacleDetection()
+                moveWithObstacleDetection();
                 break;
 
             case CONVERGING:
                 if (sharedEnemyX != -1) {
-                    meetAtPoint(sharedEnemyX, sharedEnemyY, 100);
+                    meetAtPointSafe(sharedEnemyX, sharedEnemyY, 100);
                 } else {
                     state = State.MOVE;
                 }
@@ -213,7 +212,7 @@ public class RobotB extends Brain {
 
             case ATTACKING:
                 if (enemyCheck()) shootEnemy();
-                else meetAtPoint(DEFAULTX, DEFAULTY, 100); // go back to default position
+                else meetAtPointSafe(DEFAULTX, DEFAULTY, 100); // go back to default position
                 break;
 
             case WAITING:
@@ -243,8 +242,7 @@ public class RobotB extends Brain {
                 if (isSameDirection(myGetHeading(), targetAngle)) {
                     state = State.MOVE;
                 } else {
-                    Parameters.Direction turnDir = getTurnDirection(myGetHeading(), targetAngle);
-                    stepTurn(turnDir);
+                    turnTowards(targetAngle);
                 }
                 break;
 
@@ -263,13 +261,13 @@ public class RobotB extends Brain {
                 if (isSameDirection(myGetHeading(), targetAngle)) {
                     state = State.AVOID_FORWARD;
                 } else {
-                    Parameters.Direction d = getTurnDirection(myGetHeading(), targetAngle);
-                    stepTurn(d);
+                    turnTowards(targetAngle);
                 }
                 break;
 
             case AVOID_FORWARD:
                 if (avoidForwardSteps > 0) {
+                    // ✅ STILL CHECK OBSTACLES even in avoidance
                     if (!obstacleCheck()) {
                         myMove();
                         avoidForwardSteps--;
@@ -290,6 +288,97 @@ public class RobotB extends Brain {
         }
     }
 
+    // ============================================================
+    // ===== ✅ NEW UNIFIED MOVEMENT METHODS =====
+    // ============================================================
+
+    /**
+     * Universal movement method - checks obstacles before moving
+     * Call this instead of myMove() everywhere
+     */
+    private void moveWithObstacleDetection() {
+        // Skip obstacle check for specific states if needed
+        if (skipObstacleAvoidance) {
+            myMove();
+            return;
+        }
+
+        if (!obstacleCheck()) {
+            myMove();
+            consecutiveBlocked = 0;
+        } else {
+            consecutiveBlocked++;
+            // Trigger avoidance based on current state
+            handleObstacleAvoidance();
+        }
+    }
+
+    /**
+     * Handles obstacle avoidance based on current state context
+     */
+    private void handleObstacleAvoidance() {
+        switch (state) {
+            case MOVE:
+                startAvoiding(State.MOVE, -1, -1, 0);
+                break;
+
+            case CONVERGING:
+                // Keep the converging goal when avoiding
+                startAvoiding(State.CONVERGING, sharedEnemyX, sharedEnemyY, 100);
+                break;
+
+            case ATTACKING:
+                // When attacking, just do simple backup-turn
+                state = State.BACKING_UP;
+                backupSteps = 0;
+                break;
+
+            // Add other states as needed
+            default:
+                // Generic fallback: backup and turn
+                startAvoiding(state, -1, -1, 0);
+                break;
+        }
+    }
+
+    /**
+     * Turn towards target with obstacle awareness
+     */
+    private void turnTowards(double targetAngle) {
+        if (!isSameDirection(myGetHeading(), targetAngle)) {
+            Parameters.Direction dir = getTurnDirection(myGetHeading(), targetAngle);
+            stepTurn(dir);
+        }
+    }
+
+    /**
+     * Safe version of meetAtPoint - uses unified obstacle detection
+     */
+    private void meetAtPointSafe(double x, double y, double precision) {
+        double distance = Math.hypot(x - myX, y - myY);
+
+        if (distance < precision) {
+            sendLogMessage(robotName + " >>> Arrived near target!");
+            if(x == DEFAULTX && y == DEFAULTY){
+                state = State.STOPPED;
+                noEnemySignalCooldown = STOPPED_TIME;
+                return;
+            }
+            state = State.MOVE;
+            return;
+        }
+
+        double angleToTarget = Math.atan2(y - myY, x - myX);
+
+        if (!isSameDirection(myGetHeading(), angleToTarget)) {
+            turnTowards(angleToTarget);
+            return;
+        }
+
+        // ✅ OBSTACLES AUTOMATICALLY HANDLED
+        moveWithObstacleDetection();
+    }
+
     // === AVOIDANCE MEMORY ===
 
     private void startAvoiding(State comeBackTo, double gx, double gy, double prec) {
@@ -304,45 +393,19 @@ public class RobotB extends Brain {
         state = State.AVOID_BACK;
     }
 
-    // === NAVIGATION METHODS ===
-
-    private void meetAtPoint(double x, double y, double precision) {
-        double distance = Math.hypot(x - myX, y - myY);
-
-        if (distance < precision) {
-            sendLogMessage(robotName + " >>> Arrived near target!");
-            // stay in converging logic but can fall back to MOVE if you want
-            if(x == DEFAULTX && y == DEFAULTY){
-                state = State.STOPPED;
-                noEnemySignalCooldown = STOPPED_TIME;
-                return;
-            }
-            state = State.MOVE;
-            return;
-        }
-
-        double angleToTarget = Math.atan2(y - myY, x - myX);
-
-        if (!isSameDirection(myGetHeading(), angleToTarget)) {
-            Parameters.Direction dir = getTurnDirection(myGetHeading(), angleToTarget);
-            stepTurn(dir);
-            return;
-        }
-
-        if (obstacleCheck()) {
-            // IMPORTANT: avoid but keep goal
-            startAvoiding(State.CONVERGING, x, y, precision);
-            return;
-        }
-
-        myMove();
-    }
-
     // ✅ SMALL-TURN AVOIDANCE (30° targets)
     private double calculateAvoidanceAngleSmall() {
         double heading = myGetHeading();
         int leftObs = 0, rightObs = 0;
 
+        if (detectFront().getObjectType() == IFrontSensorResult.Types.WALL) {
+            // Alternate left / right to avoid spinning bias
+            if (consecutiveBlocked % 2 == 0) {
+                return normalize(heading + Math.PI / 2); // +90° // big turns to get out of it fast
+            } else {
+                return normalize(heading - Math.PI / 2); // -90°
+            }
+        }
         for (IRadarResult o : detectRadar()) {
             if (isBehind(o.getObjectDirection())) continue;
             if (o.getObjectDistance() <= 250) {
