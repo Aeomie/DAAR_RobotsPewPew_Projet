@@ -95,40 +95,46 @@ public class RobotSecondary extends Brain {
 
     @Override
     public void activate() {
-        /*
-        Alpha is the one on bottom - explores north (top)
-        Beta is the one on top - explores south (bottom)
-         */
+        // Alpha = bottom -> explores NORTH (up)
+        // Beta  = top    -> explores SOUTH (down)
+
         boolean seesNorth = false;
 
         for (IRadarResult o : detectRadar()) {
             if (o.getObjectType() == IRadarResult.Types.TeamSecondaryBot) {
-                if (isSameDirection(o.getObjectDirection(), Parameters.NORTH)) seesNorth = true;
+                if (isSameDirection(o.getObjectDirection(), Parameters.NORTH)) {
+                    seesNorth = true; // other secondary is above me => I'm bottom
+                }
             }
         }
 
-        // Determine initial position from Parameters
-        myX = Parameters.teamASecondaryBot1InitX;
-        myY = Parameters.teamASecondaryBot1InitY;
+        retreatDefaultX = (Parameters.teamASecondaryBot1InitX + Parameters.teamASecondaryBot2InitX) / 2.0;
+        retreatDefaultY = (Parameters.teamASecondaryBot1InitY + Parameters.teamASecondaryBot2InitY) / 2.0;
 
-        retreatDefaultX = (Parameters.teamASecondaryBot1InitX + Parameters.teamASecondaryBot2InitX) / 2;
-        retreatDefaultY = (Parameters.teamASecondaryBot1InitY + Parameters.teamASecondaryBot2InitY) / 2;
         if (seesNorth) {
-            // Bottom position
+            // I'm the BOTTOM bot => init #2 (y=1200)
             role = Role.EXPLORER_ALPHA;
             robotName = "Explorer Alpha";
-            System.out.println("I am " + robotName + " (bottom), I will explore the NORTH area.");
-            state = State.TURNING_SOUTH;
-            targetAngle = Parameters.SOUTH;
-        } else {
-            // Top position
-            role = Role.EXPLORER_BETA;
-            robotName = "Explorer Beta";
             myX = Parameters.teamASecondaryBot2InitX;
             myY = Parameters.teamASecondaryBot2InitY;
-            System.out.println("I am " + robotName + " (top), I will explore the SOUTH area.");
+
+            // go NORTH (up => y decreases)
+            state = State.TURNING_SOUTH;
+            targetAngle = Parameters.SOUTH;
+
+            sendLogMessage("I am " + robotName + " (bottom), going SOUTH from (" + (int)myX + "," + (int)myY + ").");
+        } else {
+            // I'm the TOP bot => init #1 (y=800)
+            role = Role.EXPLORER_BETA;
+            robotName = "Explorer Beta";
+            myX = Parameters.teamASecondaryBot1InitX;
+            myY = Parameters.teamASecondaryBot1InitY;
+
+            // go SOUTH (down => y increases)
             state = State.TURNING_NORTH;
             targetAngle = Parameters.NORTH;
+
+            sendLogMessage("I am " + robotName + " (top), going NORTH from (" + (int)myX + "," + (int)myY + ").");
         }
 
         isMoving = false;
@@ -140,6 +146,7 @@ public class RobotSecondary extends Brain {
 
     @Override
     public void step() {
+        sendLogMessage(robotName+"x("+(int)myX+","+(int)myY+")");
         updateOdometry();
         readTeammateMessages();
         enemyBroadcastCooldown = Math.max(0, enemyBroadcastCooldown - 1);

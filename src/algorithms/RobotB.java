@@ -79,7 +79,7 @@ public class RobotB extends Brain {
 
     private static final int AVOID_BACK_STEPS = 5;      // tweak 3–8
     private static final int AVOID_FORWARD_STEPS = 10;  // tweak 6–15
-
+    private static final double BORDER_MARGIN = 100.0;
     // ✅ NEW: Flag to skip obstacle avoidance for special cases
     private boolean skipObstacleAvoidance = false;
 
@@ -133,7 +133,7 @@ public class RobotB extends Brain {
 
         DEFAULTX = Parameters.teamBMainBot2InitX - 300; // For B its - & for A its +
         DEFAULTY = Parameters.teamBMainBot2InitY;
-        sendLogMessage("=== I AM " + robotName + "! ===");
+//        sendLogMessage("=== I AM " + robotName + "! ===");
 
         state = State.STOPPED;
 
@@ -358,7 +358,7 @@ public class RobotB extends Brain {
         double distance = Math.hypot(x - myX, y - myY);
 
         if (distance < precision) {
-            sendLogMessage(robotName + " >>> Arrived near target!");
+//            sendLogMessage(robotName + " >>> Arrived near target!");
             if(x == DEFAULTX && y == DEFAULTY){
                 state = State.STOPPED;
                 noEnemySignalCooldown = STOPPED_TIME;
@@ -399,13 +399,24 @@ public class RobotB extends Brain {
         int leftObs = 0, rightObs = 0;
 
         if (detectFront().getObjectType() == IFrontSensorResult.Types.WALL) {
-            // Alternate left / right to avoid spinning bias
-            if (consecutiveBlocked % 2 == 0) {
-                return normalize(heading + Math.PI / 2); // +90° // big turns to get out of it fast
-            } else {
-                return normalize(heading - Math.PI / 2); // -90°
+
+            // If we are actively engaging (enemy around), do NOT use border logic.
+            // Just get off the wall quickly.
+            if (enemyCheck()) {
+                return directWallTurn(heading);
             }
+
+            // No enemy pressure:
+            // If we're close to a border we already know => treat as border wall, turn inward (center).
+            if (nearKnownBorder()) {
+                return normalize(angleTowardKnownCenter());
+            }
+
+            // Otherwise it's probably an unknown border (or we haven't learned it yet):
+            // turn directly (fast).
+            return directWallTurn(heading);
         }
+
         for (IRadarResult o : detectRadar()) {
             if (isBehind(o.getObjectDirection())) continue;
             if (o.getObjectDistance() <= 250) {
@@ -436,7 +447,7 @@ public class RobotB extends Brain {
         boolean blockedByWreck = isBlockedByWreckObstacle();
         boolean blockedByTeamMate = isBlockedByTeamMate();
         boolean blockedByOpponent = isBlockedByOpponent();
-
+        sendLogMessage("WEST: " + westBound + " EAST: " + eastBound + " NORTH: " + northBound + " SOUTH: " + southBound);
         if (moveSign != 0) {
             // if moving forward and blocked, don't integrate.
             // if moving back, we ignore "front wall" sensor; still can be blocked by bots/wrecks though
@@ -733,9 +744,50 @@ public class RobotB extends Brain {
 
             if (!alreadyKnown) {
                 knownWrecks.add(new WreckInfo(wx, wy));
-                sendLogMessage(robotName + " memorized wreck at (" + (int) wx + ", " + (int) wy + ")  total=" + knownWrecks.size());
+//                sendLogMessage(robotName + " memorized wreck at (" + (int) wx + ", " + (int) wy + ")  total=" + knownWrecks.size());
             }
         }
     }
+
+    private double minDistanceToKnownBorder() {
+        double best = Double.POSITIVE_INFINITY;
+
+        if (northBound != -1) best = Math.min(best, Math.abs(northBound - myY));
+        if (southBound != -1) best = Math.min(best, Math.abs(myY - southBound));
+        if (eastBound  != -1) best = Math.min(best, Math.abs(eastBound  - myX));
+        if (westBound  != -1) best = Math.min(best, Math.abs(myX - westBound));
+
+        return best;
+    }
+
+    private boolean nearKnownBorder() {
+        return minDistanceToKnownBorder() <= BORDER_MARGIN;
+    }
+
+    /**
+     * Point inward (toward the center of known bounds if we have them,
+     * otherwise fallback to DEFAULTX/DEFAULTY).
+     */
+    private double angleTowardKnownCenter() {
+        double cx;
+        if (westBound != -1 && eastBound != -1) cx = (westBound + eastBound) / 2.0;
+        else cx = DEFAULTX;
+
+        double cy;
+        if (southBound != -1 && northBound != -1) cy = (southBound + northBound) / 2.0;
+        else cy = DEFAULTY;
+
+        return Math.atan2(cy - myY, cx - myX);
+    }
+
+    /**
+     * Fast "just get off the wall" turn used when we hit a wall but don't trust borders yet.
+     */
+    private double directWallTurn(double heading) {
+        // Alternate to avoid bias
+        if (consecutiveBlocked % 2 == 0) return normalize(heading + Math.PI / 2);
+        return normalize(heading - Math.PI / 2);
+    }
+
 
 }

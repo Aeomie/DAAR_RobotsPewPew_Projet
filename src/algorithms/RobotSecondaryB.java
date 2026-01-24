@@ -44,6 +44,7 @@ public class RobotSecondaryB extends Brain {
 
 
     private static final double DETECTION_RANGE = Parameters.teamBSecondaryBotFrontalDetectionRange;
+    private static final double ROBOT_SIZE = Parameters.teamBSecondaryBotRadius;
     private int yieldBackSteps = 0;
     private static final int YIELD_BACK_STEPS_MAIN = 6;
     private static final int YIELD_BACK_STEPS_SECONDARY = 3;
@@ -60,7 +61,7 @@ public class RobotSecondaryB extends Brain {
     private double latchX = Double.NaN, latchY = Double.NaN;
     private boolean wallLatchActive = false;
     private boolean latchJustCompleted = false;
-    private double WALLOFFSET= 400;
+    private double LATCH_WALLOFFSET= 400;
 
 
     private int enemyBroadcastCooldown = 0;
@@ -100,46 +101,34 @@ public class RobotSecondaryB extends Brain {
         Alpha is the one on bottom - explores north (top)
         Beta is the one on top - explores south (bottom)
          */
-        int botsAbove = 0;
-        int botsBelow = 0;
+        boolean seesNorth = false;
 
-        for (IRadarResult o : detectRadar()){
-            if(o.getObjectType() == IRadarResult.Types.TeamSecondaryBot){
-                double relativeAngle = normalize(o.getObjectDirection() - myGetHeading());
-
-                // Check if teammate is above (north direction range: π/4 to 3π/4)
-                if (relativeAngle > Math.PI / 4 && relativeAngle < 3 * Math.PI / 4) {
-                    botsAbove++;
-                }
-                // Check if teammate is below (south direction range: 5π/4 to 7π/4)
-                else if (relativeAngle > 5 * Math.PI / 4 && relativeAngle < 7 * Math.PI / 4) {
-                    botsBelow++;
-                }
+        for (IRadarResult o : detectRadar()) {
+            if (o.getObjectType() == IRadarResult.Types.TeamSecondaryBot) {
+                if (isSameDirection(o.getObjectDirection(), Parameters.NORTH)) seesNorth = true;
             }
         }
 
-        // Determine initial position from Parameters
-        myX = Parameters.teamBSecondaryBot1InitX;
-        myY = Parameters.teamBSecondaryBot1InitY;
-
         retreatDefaultX = (Parameters.teamBSecondaryBot1InitX + Parameters.teamBSecondaryBot2InitX) / 2;
         retreatDefaultY = (Parameters.teamBSecondaryBot1InitY + Parameters.teamBSecondaryBot2InitY) / 2;
-        if (botsAbove == 0 && botsBelow == 1) {
+        if (seesNorth) {
             // Bottom position
             role = Role.EXPLORER_ALPHA;
             robotName = "Explorer Alpha";
-            System.out.println("I am " + robotName + " (bottom), I will explore the NORTH area.");
-            state = State.TURNING_NORTH;
-            targetAngle = Parameters.NORTH;
+            myX = Parameters.teamBSecondaryBot2InitX;
+            myY = Parameters.teamBSecondaryBot2InitY;
+            System.out.println("I am " + robotName + " (bottom),going SOUTH,(x=" + (int)myX + ", y=" + (int)myY + ")");
+            state = State.TURNING_SOUTH;
+            targetAngle = Parameters.SOUTH;
         } else {
             // Top position
             role = Role.EXPLORER_BETA;
             robotName = "Explorer Beta";
-            myX = Parameters.teamBSecondaryBot2InitX;
-            myY = Parameters.teamBSecondaryBot2InitY;
-            System.out.println("I am " + robotName + " (top), I will explore the SOUTH area.");
-            state = State.TURNING_SOUTH;
-            targetAngle = Parameters.SOUTH;
+            myX = Parameters.teamBSecondaryBot1InitX;
+            myY = Parameters.teamBSecondaryBot1InitY;
+            System.out.println("I am " + robotName + " (top),going NORTH,(x=" + (int)myX + ", y=" + (int)myY + ")");
+            state = State.TURNING_NORTH;
+            targetAngle = Parameters.NORTH;
         }
 
         isMoving = false;
@@ -197,9 +186,9 @@ public class RobotSecondaryB extends Brain {
                     }
 
                     if (!wallLatchActive) {
-                        latchWallStart();
-                        northBound = myY;
+                        updateBorder("NORTH", myY - DETECTION_RANGE);
                         broadcastBorders("NORTH");
+                        latchWallStart();
                     }
 
                     myMove();
@@ -226,9 +215,9 @@ public class RobotSecondaryB extends Brain {
                     }
 
                     if (!wallLatchActive) {
-                        latchWallStart();
-                        southBound = myY;
+                        updateBorder("SOUTH", myY + DETECTION_RANGE);
                         broadcastBorders("SOUTH");
+                        latchWallStart();
                     }
 
                     myMove();
@@ -255,7 +244,7 @@ public class RobotSecondaryB extends Brain {
                     break;
                 }
                 if (detectWall()) {
-                    westBound = myX;
+                    updateBorder("WEST", myX - DETECTION_RANGE);
                     broadcastBorders("WEST");
                     state = State.EXPLORATION_COMPLETE;
                 } else {
@@ -281,7 +270,7 @@ public class RobotSecondaryB extends Brain {
                     break;
                 }
                 if (detectWall()) {
-                    eastBound = myX;
+                    updateBorder("EAST", myX + DETECTION_RANGE);
                     broadcastBorders("EAST");
                     state = State.EXPLORATION_COMPLETE;
                 } else {
@@ -447,6 +436,7 @@ public class RobotSecondaryB extends Brain {
                 if (lastMoveWasBack) s = -s;
                 myX += s * Math.cos(myGetHeading());
                 myY += s * Math.sin(myGetHeading());
+                sendLogMessage(robotName+ "(x=" + (int)myX + ", y=" + (int)myY + ")");
             }
             isMoving = false;
         }
@@ -592,7 +582,7 @@ public class RobotSecondaryB extends Brain {
                         String borderType = parts[1];
                         String position = parts[2];
                         Integer pos = Integer.parseInt(position);
-//                        sendLogMessage(robotName + " received border info: " + borderType + " at " + pos);
+                        sendLogMessage(robotName + " received border info: " + borderType + " at " + pos);
                         switch (borderType) {
                             case "NORTH":
                                 northBound = pos;
@@ -675,7 +665,7 @@ public class RobotSecondaryB extends Brain {
     private boolean detectWall() {
         if (wallLatchActive) {
             double traveled = dist(myX, myY, latchX, latchY);
-            if (traveled >= WALLOFFSET) {
+            if (traveled >= LATCH_WALLOFFSET) {
                 wallLatchActive = false;
                 latchJustCompleted = true;   // <- mark completion
                 return true;
@@ -795,18 +785,6 @@ public class RobotSecondaryB extends Brain {
         return best;
     }
 
-    private boolean enemyMainBotTooClose() {
-        IRadarResult e = getClosestEnemyMainBot();
-        return e != null && e.getObjectDistance() < ENEMY_MAINBOT_KEEP_DISTANCE;
-    }
-    private double computeEvadeAngleFromEnemy(IRadarResult enemy) {
-        // We want to face away from the enemy.
-        // If enemy direction is absolute, desired heading is enemyDir + PI.
-        // If it's relative, this still works reasonably since you normalize with heading elsewhere.
-        return normalize(enemy.getObjectDirection() + Math.PI);
-    }
-
-
     /*
     UTILITY FUNCTIONS
 
@@ -833,4 +811,20 @@ public class RobotSecondaryB extends Brain {
     }
 
 
+    private void updateBorder(String border, double pos){
+        switch(border){
+            case "NORTH":
+                northBound = pos;
+                break;
+            case "SOUTH":
+                southBound = pos;
+                break;
+            case "WEST":
+                westBound = pos;
+                break;
+            case "EAST":
+                eastBound = pos;
+                break;
+        }
+    }
 }
