@@ -16,6 +16,7 @@ public class RobotSecondaryB extends Brain {
         TURNING_BACK,          // generic "turn to targetAngle"
         GOING_NORTH, CHECKING_SOUTH, CHECKING_WEST, CHECKING_EAST,
         EXPLORATION_COMPLETE,
+        UTURN,
         IDLE
     }
 
@@ -37,7 +38,6 @@ public class RobotSecondaryB extends Brain {
     private static final double DETECTION_RANGE = Parameters.teamBSecondaryBotFrontalDetectionRange;
 
     // ===== IMPROVED "SIMPLE" AVOIDANCE (incremental turns) =====
-    // 30°, 60°, 90°, 120°... when blocked repeatedly
     private static final double AVOID_STEP = Math.PI / 6;      // 30°
     private static final int AVOID_MAX_STEPS = 12;             // 12 * 30° = 360°
     private int avoidSide = 1;                                 // +1 right, -1 left
@@ -47,11 +47,20 @@ public class RobotSecondaryB extends Brain {
     private int escapeBackSteps = 0;
     private static final int ESCAPE_BACK_STEPS = 3;
 
-    // big “commitment” turn when wedged
     private static final double ESCAPE_TURN = Math.PI / 2; // 90°
 
     private static final double WALL_BORDER_MARGIN = 120;
     private static final double SECONDARY_CLOSER_MARGIN = 300;
+
+    // ===== WALL U-TURN SCAN (FIXED) =====
+    private int uTurnStep = 0;          // 0..AVOID_MAX_STEPS
+    private double uTurnStartHeading = 0;
+    private int uTurnSide = 1;          // +1 right, -1 left
+
+    // ===== teammate-secondary deadlock fixes =====
+    private static final double FRONT_CONE = Math.PI / 3; // 60°
+    private static final double TEAM_SECONDARY_RANGE = DETECTION_RANGE;
+    private boolean blockedByTeammateSecondary = false;
 
     @Override
     public void activate() {
@@ -78,10 +87,16 @@ public class RobotSecondaryB extends Brain {
             targetAngle = Parameters.NORTH;
         }
 
+        // UTURN init
+        uTurnStep = 0;
+        uTurnStartHeading = 0;
+        uTurnSide = 1;
+
         isMoving = false;
         avoidSide = 1;
         consecutiveBlocks = 0;
         escapeBackSteps = 0;
+        blockedByTeammateSecondary = false;
     }
 
     @Override
@@ -89,7 +104,6 @@ public class RobotSecondaryB extends Brain {
         updateOdometry();
         readTeammateMessages();
 
-        // hard escape: if we triggered it, back up first
         if (escapeBackSteps > 0) {
             myMoveBack();
             escapeBackSteps--;
@@ -112,6 +126,10 @@ public class RobotSecondaryB extends Brain {
 
             case TURNING_EAST:
                 turnToward(Parameters.EAST, State.CHECKING_EAST);
+                break;
+
+            case UTURN:
+                doUTurnScan();
                 break;
 
             case GOING_NORTH:
@@ -178,7 +196,6 @@ public class RobotSecondaryB extends Brain {
                 break;
 
             case MOVE:
-                // roaming uses the same avoidance rule
                 simpleAvoid(State.MOVE);
                 break;
 
@@ -186,8 +203,6 @@ public class RobotSecondaryB extends Brain {
                 if (!isSameDirection(myGetHeading(), targetAngle)) {
                     stepTurn(getTurnDirection(myGetHeading(), targetAngle));
                 } else {
-                    // IMPORTANT: don't reset counters here.
-                    // Next tick in afterTurnState, we'll either move (if clear) or call simpleAvoid again and increase turn.
                     state = afterTurnState;
                 }
                 break;
@@ -199,53 +214,100 @@ public class RobotSecondaryB extends Brain {
 
     // =========================
     // SIMPLE AVOIDANCE (UPGRADED)
-    // - If blocked repeatedly: try 30°, 60°, 90°, 120°... around
-    // - If full scan fails: backstep once + flip side + reset
-    // - If "hard stuck": backstep burst + 90° commitment
     // =========================
     private void simpleAvoid(State returnState) {
 
-        // Clear -> move and reset counters
+        // anti-spam guard: only UTURN if we really failed at least once
+        if (detectWall() && consecutiveBlocks >= 1) {
+            enterUTurnMode(returnState);
+            return;
+        }
+
         if (!blockedAhead()) {
             myMove();
             consecutiveBlocks = 0;
             return;
         }
 
-        // Blocked this tick
         consecutiveBlocks++;
 
-        // HARD ESCAPE if stuck too long
+        // If it's OUR other secondary bot, don't mirror each other:
+        // Alpha always yields one side, Beta the other.
+        if (blockedByTeammateSecondary) {
+            avoidSide = (role == Role.EXPLORER_ALPHA) ? +1 : -1;
+        }
+
         if (consecutiveBlocks >= BLOCK_ESCAPE_TRIGGER) {
             escapeBackSteps = ESCAPE_BACK_STEPS;
 
-            avoidSide = -avoidSide; // alternate
+            avoidSide = -avoidSide;
             targetAngle = normalize(myGetHeading() + avoidSide * ESCAPE_TURN);
 
             afterTurnState = returnState;
             state = State.TURNING_BACK;
 
-            consecutiveBlocks = 0; // reset so we don't instantly re-trigger
+            consecutiveBlocks = 0;
             return;
         }
 
-        // If we've effectively scanned a full circle in 30° chunks, do a soft reset
         if (consecutiveBlocks > AVOID_MAX_STEPS) {
-            myMoveBack();               // one backstep to create space
+            myMoveBack();
             consecutiveBlocks = 0;
             avoidSide = -avoidSide;
             return;
         }
 
-        // Progressive turn: 30°, 60°, 90°, 120°...
-        // Flip side occasionally so we don't orbit forever in symmetric deadlocks
-        if (consecutiveBlocks % 2 == 0) avoidSide = -avoidSide;
+        // Only flip side for symmetric deadlocks if NOT teammate-secondary
+        if (!blockedByTeammateSecondary && consecutiveBlocks % 2 == 0) avoidSide = -avoidSide;
 
         double turnAmount = consecutiveBlocks * AVOID_STEP;
         targetAngle = normalize(myGetHeading() + avoidSide * turnAmount);
 
         afterTurnState = returnState;
         state = State.TURNING_BACK;
+    }
+
+    // ==========================================================
+    // UTURN MODE (FIXED)
+    // ==========================================================
+    private void enterUTurnMode(State returnState) {
+        escapeBackSteps = Math.max(escapeBackSteps, 1);
+
+        uTurnSide = -uTurnSide;
+
+        uTurnStartHeading = normalize(myGetHeading() + Math.PI);
+        uTurnStep = 0;
+        targetAngle = uTurnStartHeading;
+
+        afterTurnState = returnState;
+        state = State.UTURN;
+    }
+
+    private void doUTurnScan() {
+        if (!isSameDirection(myGetHeading(), targetAngle)) {
+            stepTurn(getTurnDirection(myGetHeading(), targetAngle));
+            return;
+        }
+
+        // aligned: if front is free, move and exit
+        if (detectFront().getObjectType() == IFrontSensorResult.Types.NOTHING) {
+            myMove();
+            consecutiveBlocks = 0;
+            state = afterTurnState;
+            return;
+        }
+
+        // next step
+        uTurnStep++;
+
+        if (uTurnStep > AVOID_MAX_STEPS) {
+            escapeBackSteps = Math.max(escapeBackSteps, 2);
+            consecutiveBlocks = 0;
+            state = afterTurnState;
+            return;
+        }
+
+        targetAngle = normalize(uTurnStartHeading + uTurnSide * uTurnStep * AVOID_STEP);
     }
 
     // =========================
@@ -356,16 +418,20 @@ public class RobotSecondaryB extends Brain {
     }
 
     private boolean blockedAhead() {
-        // wall is handled below (with border logic)
+        blockedByTeammateSecondary = false;
+
         if (wallBlocksNow()) return true;
 
-        return isRadarObstacleInFront(IRadarResult.Types.Wreck, DETECTION_RANGE)
-                || isRadarObstacleInFront(IRadarResult.Types.TeamMainBot, DETECTION_RANGE)
-                || isRadarObstacleInFront(IRadarResult.Types.OpponentMainBot, DETECTION_RANGE)
-                || isRadarObstacleInFront(IRadarResult.Types.OpponentSecondaryBot,
-                Math.max(0, DETECTION_RANGE - SECONDARY_CLOSER_MARGIN))
-                || isRadarObstacleInFront(IRadarResult.Types.TeamSecondaryBot,
-                Math.max(0, DETECTION_RANGE - SECONDARY_CLOSER_MARGIN));
+        boolean wreck = isRadarObstacleInFront(IRadarResult.Types.Wreck, DETECTION_RANGE);
+        boolean teamMain = isRadarObstacleInFront(IRadarResult.Types.TeamMainBot, DETECTION_RANGE);
+        boolean oppMain = isRadarObstacleInFront(IRadarResult.Types.OpponentMainBot, DETECTION_RANGE);
+
+        boolean oppSec = isRadarObstacleInFront(IRadarResult.Types.OpponentSecondaryBot, DETECTION_RANGE);
+
+        boolean teamSec = isRadarObstacleInFront(IRadarResult.Types.TeamSecondaryBot, TEAM_SECONDARY_RANGE);
+        if (teamSec) blockedByTeammateSecondary = true;
+
+        return wreck || teamMain || oppMain || oppSec || teamSec;
     }
 
     private boolean isRadarObstacleInFront(IRadarResult.Types type, double range) {
@@ -379,13 +445,12 @@ public class RobotSecondaryB extends Brain {
 
     private boolean isInFront(double objDir) {
         double rel = normalize(objDir - myGetHeading());
-        return rel < Math.PI / 4 || rel > (2 * Math.PI - Math.PI / 4);
+        return rel < FRONT_CONE || rel > (2 * Math.PI - FRONT_CONE);
     }
 
     private boolean wallBlocksNow() {
         if (!detectWall()) return false;
 
-        // If we don't know any border yet, wall blocks normally
         if (northBound < 0 && southBound < 0 && westBound < 0 && eastBound < 0) return true;
 
         double h = myGetHeading();
