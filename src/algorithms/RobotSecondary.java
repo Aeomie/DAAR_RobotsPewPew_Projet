@@ -84,6 +84,16 @@ public class RobotSecondary extends Brain {
     private static double retreatDefaultY = 0;
     private static double mateDistance = 0;
 
+
+    // ===== BULLET HIT REACTION =====
+    private int hitSteerTicks = 0;
+    private static final int HIT_STEER_TICKS = 25;      // how long we commit to escaping
+    private int hitSteerCooldown = 0;
+    private static final int HIT_STEER_COOLDOWN = 50;   // prevents direction flip spam
+    private double hitSteerAngle = Double.NaN;
+    private static final int BULLET_BINS = 16;          // 16 bins = 22.5° each
+
+
     // optional: don’t retreat if we’ve never seen the mate yet
     private boolean hasMatePos = false;
 
@@ -139,6 +149,7 @@ public class RobotSecondary extends Brain {
         lastHealth = getHealth();
         consecutiveBlocked = 0;
         damageTakenCooldown = DAMAGE_TAKEN_COOLDOWN;
+        hitSteerCooldown = HIT_STEER_COOLDOWN;
     }
 
     @Override
@@ -148,28 +159,29 @@ public class RobotSecondary extends Brain {
         enemyBroadcastCooldown = Math.max(0, enemyBroadcastCooldown - 1);
         teammateScanCooldown = Math.max(0, teammateScanCooldown - 1);
         damageTakenCooldown = Math.max(0 , damageTakenCooldown - 1);
+        hitSteerCooldown = Math.max(0, hitSteerCooldown - 1);
 
         if (teammateScanCooldown == 0) {
             scanTeamMates();
             teammateScanCooldown = TEAMMATE_SCAN_PERIOD;
         }
 
+        // may set hitSteerAngle/hitSteerTicks + state=TURNING_BACK
         damageTakenCheck();
 
-// If retreating, do it with priority
+        // If retreating, do it with priority (BUT: hit steer disables retreat in damageTakenCheck())
         if (retreatToMate) {
             retreatCooldown--;
-            if(mateDistance > retreatMateDistance){
-                meetAtPoint(mateX, mateY, 100); // precision in mm (120 is reasonable)
-            }else{
+            if (mateDistance > retreatMateDistance) {
+                meetAtPoint(mateX, mateY, 100);
+            } else {
                 meetAtPoint(retreatDefaultX, retreatDefaultY, 100);
             }
             if (retreatCooldown <= 0) retreatToMate = false;
             return;
         }
 
-
-        switch (state){
+        switch (state) {
             case TURNING_NORTH:
                 if (isSameDirection(myGetHeading(), Parameters.NORTH)) {
                     state = State.GOING_NORTH;
@@ -181,7 +193,6 @@ public class RobotSecondary extends Brain {
             case GOING_NORTH:
                 if (detectWall()) {
                     if (latchJustCompleted) {
-                        // We finished approaching this tick: turn now, don't re-latch
                         latchJustCompleted = false;
                         state = State.TURNING_WEST;
                         targetAngle = Parameters.WEST;
@@ -189,13 +200,11 @@ public class RobotSecondary extends Brain {
                     }
 
                     if (!wallLatchActive) {
-                        // First time we see the wall → latch + broadcast once
                         latchWallStart();
                         northBound = myY;
                         broadcastBorders("NORTH");
                     }
 
-                    // Move toward the wall while latching
                     myMove();
                 } else {
                     myMove();
@@ -213,7 +222,6 @@ public class RobotSecondary extends Brain {
             case CHECKING_SOUTH:
                 if (detectWall()) {
                     if (latchJustCompleted) {
-                        // We finished approaching this tick: turn now, don't re-latch
                         latchJustCompleted = false;
                         state = State.TURNING_EAST;
                         targetAngle = Parameters.EAST;
@@ -221,18 +229,17 @@ public class RobotSecondary extends Brain {
                     }
 
                     if (!wallLatchActive) {
-                        // First time we see the wall → latch + broadcast once
                         latchWallStart();
                         northBound = myY;
                         broadcastBorders("SOUTH");
                     }
 
-                    // Move toward the wall while latching
                     myMove();
                 } else {
                     myMove();
                 }
                 break;
+
             case TURNING_WEST:
                 if (isSameDirection(myGetHeading(), Parameters.WEST)) {
                     state = State.CHECKING_WEST;
@@ -245,7 +252,6 @@ public class RobotSecondary extends Brain {
                 if (detectWall()) {
                     westBound = myX;
                     broadcastBorders("WEST");
-                    /* Roamning normally after */
                     state = State.EXPLORATION_COMPLETE;
                 } else {
                     myMove();
@@ -271,13 +277,52 @@ public class RobotSecondary extends Brain {
                 break;
 
             case EXPLORATION_COMPLETE:
-                // Start roaming
                 consecutiveBlocked = 0;
                 state = State.MOVE;
                 break;
 
             case MOVE:
-                // 0) Enemy panic-back already in progress (HIGHEST PRIORITY)
+
+                // =====================================================
+                // 0) HIT STEER OVERRIDE (priority, forward only)
+                // =====================================================
+                if (hitSteerTicks > 0 && !Double.isNaN(hitSteerAngle)) {
+
+                    // If not facing escape direction -> turn using your normal TURNING_BACK
+                    if (!isSameDirection(myGetHeading(), hitSteerAngle)) {
+                        targetAngle = hitSteerAngle;
+                        state = State.TURNING_BACK;
+                        hitSteerTicks--; // still consumes time so it doesn't last forever
+                        break;
+                    }
+
+                    // If facing correct way -> move FORWARD away from bullets
+                    if (!blockedAhead()) {
+                        myMove();
+                        consecutiveBlocked = 0;
+                        hitSteerTicks--;
+                        break;
+                    }
+
+                    // If blocked -> do your normal roam turn, BUT keep hit steer active
+                    consecutiveBlocked++;
+                    targetAngle = normalize(myGetHeading() + ROAM_TURN_INCREMENT);
+                    if (consecutiveBlocked % 8 == 0) {
+                        targetAngle = normalize(myGetHeading() - ROAM_TURN_INCREMENT);
+                    }
+                    if (consecutiveBlocked > 30) {
+                        targetAngle = normalize(myGetHeading() + Math.PI);
+                        consecutiveBlocked = 0;
+                    }
+
+                    state = State.TURNING_BACK;
+                    hitSteerTicks--;
+                    break;
+                }
+
+                // =====================================================
+                // 1) Enemy panic-back already in progress
+                // =====================================================
                 if (evadeEnemySteps > 0) {
                     myMoveBack();
                     evadeEnemySteps--;
@@ -287,13 +332,13 @@ public class RobotSecondary extends Brain {
                 // Detect any enemy via radar
                 IRadarResult enemy = getFirstEnemy();
 
-                // A) If enemy visible -> broadcast (cooldown protected)
+                // A) broadcast enemy
                 if (enemy != null && enemyBroadcastCooldown == 0) {
                     broadcastEnemyPosition(enemy);
                     enemyBroadcastCooldown = ENEMY_BROADCAST_PERIOD;
                 }
 
-                // B) If enemy too close -> run away
+                // B) enemy too close -> run away (your existing behavior)
                 if (enemy != null && enemy.getObjectDistance() < ENEMY_MAINBOT_KEEP_DISTANCE) {
                     evadeEnemySteps = EVADE_BACK_STEPS;
                     targetAngle = normalize(enemy.getObjectDirection() + Math.PI);
@@ -301,20 +346,20 @@ public class RobotSecondary extends Brain {
                     break;
                 }
 
-                // 1) Yielding in progress (for allies)
+                // 2) Yielding in progress
                 if (yieldBackSteps > 0) {
                     myMoveBack();
                     yieldBackSteps--;
                     break;
                 }
 
-                // 2) Our main bot has priority
+                // 3) main bot has priority
                 if (isBlockedByTeamMainBotOnlyFront()) {
                     yieldBackSteps = YIELD_BACK_STEPS_MAIN;
                     break;
                 }
 
-                // 3) Secondary-vs-secondary deadlock breaker
+                // 4) secondary vs secondary deadlock breaker
                 if (isSecondaryBlockingFront()) {
                     if (role == Role.EXPLORER_ALPHA) {
                         yieldBackSteps = YIELD_BACK_STEPS_SECONDARY;
@@ -325,13 +370,12 @@ public class RobotSecondary extends Brain {
                     break;
                 }
 
-                // 4) Normal roaming
+                // 5) Normal roaming
                 if (!blockedAhead()) {
                     myMove();
                     consecutiveBlocked = 0;
                 } else {
                     consecutiveBlocked++;
-
                     targetAngle = normalize(myGetHeading() + ROAM_TURN_INCREMENT);
 
                     if (consecutiveBlocked % 8 == 0) {
@@ -347,21 +391,18 @@ public class RobotSecondary extends Brain {
                 break;
 
             case TURNING_BACK:
-                // Turn until we reach the 30° target
                 if (!isSameDirection(myGetHeading(), targetAngle)) {
                     stepTurn(getTurnDirection(myGetHeading(), targetAngle));
                 } else {
-                    // After finishing this 30° chunk, immediately try moving again
-                    state = State.MOVE;
+                    state = State.MOVE; // unchanged
                 }
                 break;
 
-
             case IDLE:
-                // do nothing
                 break;
         }
     }
+
 
     private Parameters.Direction getTurnDirection(double current, double target) {
         double diff = normalize(target - current);
@@ -407,16 +448,72 @@ public class RobotSecondary extends Brain {
         if (lastHealth < 0) lastHealth = h;
 
         // only trigger on DAMAGE (health goes down)
-        if (h < lastHealth && damageTakenCooldown == 0) {
-            if (hasMatePos) {
-                retreatToMate = true;
-                retreatCooldown = RETREAT_COOLDOWN_STEPS;
-                damageTakenCooldown = DAMAGE_TAKEN_COOLDOWN;
+        if (h < lastHealth) {
+
+            // BULLET steering has priority, short cooldown (prevents jitter)
+            if (hitSteerCooldown == 0) {
+                double bulletDir = getDominantBulletDirection();
+
+                // If bullets are visible: go opposite bullet flow
+                if (!Double.isNaN(bulletDir)) {
+                    hitSteerAngle = normalize(bulletDir + Math.PI);
+                    hitSteerTicks = HIT_STEER_TICKS;
+                    hitSteerCooldown = HIT_STEER_COOLDOWN;
+
+                    // force a turn toward escape heading
+                    targetAngle = hitSteerAngle;
+                    state = State.TURNING_BACK;
+
+                    // IMPORTANT: pause retreat while we escape (prevents fighting behaviors)
+                    retreatToMate = false;
+                }
+            }
+
+            // keep your old retreat logic too (but it won't fight when hit steer is active)
+            if (damageTakenCooldown == 0 && hitSteerTicks == 0) {
+                if (hasMatePos) {
+                    retreatToMate = true;
+                    retreatCooldown = RETREAT_COOLDOWN_STEPS;
+                    damageTakenCooldown = DAMAGE_TAKEN_COOLDOWN;
+                }
             }
         }
 
         lastHealth = h;
     }
+
+    private double getDominantBulletDirection() {
+        double[] bins = new double[BULLET_BINS];
+        boolean found = false;
+
+        for (IRadarResult o : detectRadar()) {
+            if (o.getObjectType() == IRadarResult.Types.BULLET) {
+                found = true;
+                double dir = normalize(o.getObjectDirection());
+                double d = Math.max(1.0, o.getObjectDistance());
+
+                // closer bullets count more
+                double w = 1.0 / (d * d);
+
+                int idx = (int) Math.floor((dir / (2 * Math.PI)) * BULLET_BINS);
+                if (idx < 0) idx = 0;
+                if (idx >= BULLET_BINS) idx = BULLET_BINS - 1;
+
+                bins[idx] += w;
+            }
+        }
+
+        if (!found) return Double.NaN;
+
+        int bestIdx = 0;
+        for (int i = 1; i < BULLET_BINS; i++) {
+            if (bins[i] > bins[bestIdx]) bestIdx = i;
+        }
+
+        double binWidth = (2 * Math.PI) / BULLET_BINS;
+        return normalize((bestIdx + 0.5) * binWidth);
+    }
+
 
     private double myGetHeading() {
         double result = getHeading();

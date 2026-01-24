@@ -55,7 +55,7 @@ public class Robot extends Brain {
     private static final int SECONDARY_BOT_DETECTION_DISTANCE = 80;
 
     // STOPPED TIME
-    private static final int STOPPED_TIME = 2000;
+    private static final int STOPPED_TIME = 5000;
     private int noEnemySignalCooldown = 0;
 
     // Map bounds discovered (kept for your existing comms)
