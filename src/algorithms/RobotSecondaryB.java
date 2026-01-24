@@ -8,395 +8,189 @@ import robotsimulator.Brain;
 import java.util.ArrayList;
 
 public class RobotSecondaryB extends Brain {
-    private enum Role {UNDEFINED, EXPLORER_ALPHA, EXPLORER_BETA}
+
+    private enum Role { UNDEFINED, EXPLORER_ALPHA, EXPLORER_BETA }
     private enum State {
         MOVE,
-        TURNING_NORTH,
-        TURNING_SOUTH,
-        TURNING_WEST,
-        TURNING_EAST,
-        TURNING_BACK,          // used as generic "turn to targetAngle"
-        GOING_NORTH,
-        CHECKING_WEST,
-        CHECKING_EAST,
-        CHECKING_SOUTH,
+        TURNING_NORTH, TURNING_SOUTH, TURNING_WEST, TURNING_EAST,
+        TURNING_BACK,          // generic "turn to targetAngle"
+        GOING_NORTH, CHECKING_SOUTH, CHECKING_WEST, CHECKING_EAST,
         EXPLORATION_COMPLETE,
         IDLE
     }
 
     private Role role = Role.UNDEFINED;
     private State state = State.IDLE;
+    private State afterTurnState = State.MOVE;
+
     private String robotName = "undefined";
     private double myX, myY;
     private boolean isMoving = false;
+    private boolean lastMoveWasBack = false;
 
-    // You can lower this later if you want tighter turns
     private static final double ANGLE_PRECISION = 0.03;
-
     private double targetAngle;
-    private int stepCounter = 0;
 
-    // Map bounds discovered
-    private double northBound = -1;
-    private double westBound = -1;
-    private double eastBound = -1;
-    private double southBound = -1;
-
+    // discovered bounds
+    private double northBound = -1, southBound = -1, westBound = -1, eastBound = -1;
 
     private static final double DETECTION_RANGE = Parameters.teamBSecondaryBotFrontalDetectionRange;
-    private static final double ROBOT_SIZE = Parameters.teamBSecondaryBotRadius;
-    private int yieldBackSteps = 0;
-    private static final int YIELD_BACK_STEPS_MAIN = 6;
-    private static final int YIELD_BACK_STEPS_SECONDARY = 3;
-    private static final double YIELD_DISTANCE_SECONDARY = 140; // tweak 120–200
 
-    // Roaming turning increment (30 degrees)
-    private static final double ROAM_TURN_INCREMENT = Math.PI / 6; // 30°
-    private int consecutiveBlocked = 0;
-    private static final double ROAM_SCAN_DISTANCE = 250;
-    private boolean lastMoveWasBack = false;
-    private static final double ENEMY_MAINBOT_KEEP_DISTANCE = 400; // 550 is scan for Secondary, 350 for Main , so a bit more than main
-    private static final int EVADE_BACK_STEPS = 8;
-    private int evadeEnemySteps = 0;
-    private double latchX = Double.NaN, latchY = Double.NaN;
-    private boolean wallLatchActive = false;
-    private boolean latchJustCompleted = false;
-    private double LATCH_WALLOFFSET= 400;
+    // SIMPLE AVOIDANCE SETTINGS
+    private static final double AVOID_STEP = Math.PI / 12; // 15°
+    private static final int AVOID_MAX_TURNS = 24;         // full circle
+    private int avoidTurnCount = 0;
+    private int avoidSide = 1; // +1 right, -1 left
 
 
-    private int enemyBroadcastCooldown = 0;
-    private static final int ENEMY_BROADCAST_PERIOD = 50; // 50 steps
-    private double mateX, mateY;
-    private int teammateScanCooldown = 0;
-    private static final int TEAMMATE_SCAN_PERIOD = 50; // 50 steps
-    private static int DAMAGE_TAKEN_COOLDOWN = 100;
-    private int damageTakenCooldown = 0;
-    private double lastHealth = -1;
+    private int consecutiveBlocks = 0;
 
-    // “go back to main bot” mode after taking damage
-    private boolean retreatToMate = false;
-    private int retreatCooldown = 0;
-    private static final int RETREAT_COOLDOWN_STEPS = 80; // how long we try to retreat
-    private static double retreatMateDistance = 200;
-    private static double retreatDefaultX = 0;
-    private static double retreatDefaultY = 0;
-    private static double mateDistance = 0;
+    private static final int BLOCK_ESCAPE_TRIGGER = 5;
 
+    private int escapeBackSteps = 0;
+    private static final int ESCAPE_BACK_STEPS = 3;
 
-    // ===== BULLET HIT REACTION =====
-    private int hitSteerTicks = 0;
-    private static final int HIT_STEER_TICKS = 25;      // how long we commit to escaping
-    private int hitSteerCooldown = 0;
-    private static final int HIT_STEER_COOLDOWN = 50;   // prevents direction flip spam
-    private double hitSteerAngle = Double.NaN;
-    private static final int BULLET_BINS = 16;          // 16 bins = 22.5° each
+    // big “commitment” turn when wedged
+    private static final double ESCAPE_TURN = Math.PI / 2; // 90°
 
+    private static final double WALL_BORDER_MARGIN = 120; // how close to the known border before wall counts as blocked
+    private static final double SECONDARY_CLOSER_MARGIN = 300; // allow closer before considering blocked
 
-    // optional: don’t retreat if we’ve never seen the mate yet
-    private boolean hasMatePos = false;
 
     @Override
     public void activate() {
-        /*
-        Alpha is the one on bottom - explores north (top)
-        Beta is the one on top - explores south (bottom)
-         */
         boolean seesNorth = false;
-
         for (IRadarResult o : detectRadar()) {
             if (o.getObjectType() == IRadarResult.Types.TeamSecondaryBot) {
                 if (isSameDirection(o.getObjectDirection(), Parameters.NORTH)) seesNorth = true;
             }
         }
 
-        retreatDefaultX = (Parameters.teamBSecondaryBot1InitX + Parameters.teamBSecondaryBot2InitX) / 2;
-        retreatDefaultY = (Parameters.teamBSecondaryBot1InitY + Parameters.teamBSecondaryBot2InitY) / 2;
         if (seesNorth) {
-            // Bottom position
             role = Role.EXPLORER_ALPHA;
             robotName = "Explorer Alpha";
             myX = Parameters.teamBSecondaryBot2InitX;
             myY = Parameters.teamBSecondaryBot2InitY;
-            System.out.println("I am " + robotName + " (bottom),going SOUTH,(x=" + (int)myX + ", y=" + (int)myY + ")");
             state = State.TURNING_SOUTH;
             targetAngle = Parameters.SOUTH;
         } else {
-            // Top position
             role = Role.EXPLORER_BETA;
             robotName = "Explorer Beta";
             myX = Parameters.teamBSecondaryBot1InitX;
             myY = Parameters.teamBSecondaryBot1InitY;
-            System.out.println("I am " + robotName + " (top),going NORTH,(x=" + (int)myX + ", y=" + (int)myY + ")");
             state = State.TURNING_NORTH;
             targetAngle = Parameters.NORTH;
         }
 
         isMoving = false;
-        lastHealth = getHealth();
-        consecutiveBlocked = 0;
-        damageTakenCooldown = DAMAGE_TAKEN_COOLDOWN;
-        hitSteerCooldown = HIT_STEER_COOLDOWN;
+        avoidTurnCount = 0;
+        avoidSide = 1;
     }
 
     @Override
     public void step() {
         updateOdometry();
         readTeammateMessages();
-        enemyBroadcastCooldown = Math.max(0, enemyBroadcastCooldown - 1);
-        teammateScanCooldown = Math.max(0, teammateScanCooldown - 1);
-        damageTakenCooldown = Math.max(0 , damageTakenCooldown - 1);
-        hitSteerCooldown = Math.max(0, hitSteerCooldown - 1);
-
-        if (teammateScanCooldown == 0) {
-            scanTeamMates();
-            teammateScanCooldown = TEAMMATE_SCAN_PERIOD;
-        }
-
-        // may set hitSteerAngle/hitSteerTicks + state=TURNING_BACK
-        damageTakenCheck();
-
-        // If retreating, do it with priority (BUT: hit steer disables retreat in damageTakenCheck())
-        if (retreatToMate) {
-            retreatCooldown--;
-            if (mateDistance > retreatMateDistance) {
-                meetAtPoint(mateX, mateY, 100);
-            } else {
-                meetAtPoint(retreatDefaultX, retreatDefaultY, 100);
-            }
-            if (retreatCooldown <= 0) retreatToMate = false;
+        // hard escape: if we triggered it, back up first
+        if (escapeBackSteps > 0) {
+            myMoveBack();
+            escapeBackSteps--;
             return;
         }
 
         switch (state) {
+
             case TURNING_NORTH:
-                if (isSameDirection(myGetHeading(), Parameters.NORTH)) {
-                    state = State.GOING_NORTH;
-                } else {
-                    stepTurn(getTurnDirection(myGetHeading(), Parameters.NORTH));
-                }
-                break;
-
-            case GOING_NORTH:
-                if (detectWall()) {
-                    if (latchJustCompleted) {
-                        latchJustCompleted = false;
-                        state = State.TURNING_WEST;
-                        targetAngle = Parameters.WEST;
-                        break;
-                    }
-
-                    if (!wallLatchActive) {
-                        updateBorder("NORTH", myY - DETECTION_RANGE);
-                        broadcastBorders("NORTH");
-                        latchWallStart();
-                    }
-
-                    myMove();
-                } else {
-                    myMove();
-                }
+                turnToward(Parameters.NORTH, State.GOING_NORTH);
                 break;
 
             case TURNING_SOUTH:
-                if (isSameDirection(myGetHeading(), Parameters.SOUTH)) {
-                    state = State.CHECKING_SOUTH;
-                } else {
-                    stepTurn(getTurnDirection(myGetHeading(), Parameters.SOUTH));
+                turnToward(Parameters.SOUTH, State.CHECKING_SOUTH);
+                break;
+
+            case TURNING_WEST:
+                turnToward(Parameters.WEST, State.CHECKING_WEST);
+                break;
+
+            case TURNING_EAST:
+                turnToward(Parameters.EAST, State.CHECKING_EAST);
+                break;
+
+            case GOING_NORTH:
+                // If wall: record + turn west (finish exploration path)
+                if (detectWall()) {
+                    northBound = myY - DETECTION_RANGE;
+                    broadcastBorders("NORTH");
+                    state = State.TURNING_WEST;
+                    targetAngle = Parameters.WEST;
+                    break;
                 }
+                // If something else blocks: simple avoid, then return to GOING_NORTH
+                if (blockedAhead()) {
+                    simpleAvoid(State.GOING_NORTH);
+                    break;
+                }
+                myMove();
                 break;
 
             case CHECKING_SOUTH:
                 if (detectWall()) {
-                    if (latchJustCompleted) {
-                        latchJustCompleted = false;
-                        state = State.TURNING_EAST;
-                        targetAngle = Parameters.EAST;
-                        break;
-                    }
-
-                    if (!wallLatchActive) {
-                        updateBorder("SOUTH", myY + DETECTION_RANGE);
-                        broadcastBorders("SOUTH");
-                        latchWallStart();
-                    }
-
-                    myMove();
-                } else {
-                    myMove();
-                }
-                break;
-
-            case TURNING_WEST:
-                if(isBlockedByWreckObstacle() || isBlockedByTeamMate() || isBlockedByOpponent()) {
-                    state = State.MOVE;
+                    southBound = myY + DETECTION_RANGE;
+                    broadcastBorders("SOUTH");
+                    state = State.TURNING_EAST;
+                    targetAngle = Parameters.EAST;
                     break;
                 }
-                if (isSameDirection(myGetHeading(), Parameters.WEST)) {
-                    state = State.CHECKING_WEST;
-                } else {
-                    stepTurn(getTurnDirection(myGetHeading(), Parameters.WEST));
+                if (blockedAhead()) {
+                    simpleAvoid(State.CHECKING_SOUTH);
+                    break;
                 }
+                myMove();
                 break;
 
             case CHECKING_WEST:
-                if(isBlockedByWreckObstacle() || isBlockedByTeamMate() || isBlockedByOpponent()) {
-                    state = State.MOVE;
-                    break;
-                }
                 if (detectWall()) {
-                    updateBorder("WEST", myX - DETECTION_RANGE);
+                    westBound = myX - DETECTION_RANGE;
                     broadcastBorders("WEST");
                     state = State.EXPLORATION_COMPLETE;
-                } else {
-                    myMove();
-                }
-                break;
-
-            case TURNING_EAST:
-                if(isBlockedByWreckObstacle() || isBlockedByTeamMate() || isBlockedByOpponent()) {
-                    state = State.MOVE;
                     break;
                 }
-                if (isSameDirection(myGetHeading(), Parameters.EAST)) {
-                    state = State.CHECKING_EAST;
-                } else {
-                    stepTurn(getTurnDirection(myGetHeading(), Parameters.EAST));
+                if (blockedAhead()) {
+                    simpleAvoid(State.CHECKING_WEST);
+                    break;
                 }
+                myMove();
                 break;
 
             case CHECKING_EAST:
-                if(isBlockedByWreckObstacle() || isBlockedByTeamMate() || isBlockedByOpponent()) {
-                    state = State.MOVE;
-                    break;
-                }
                 if (detectWall()) {
-                    updateBorder("EAST", myX + DETECTION_RANGE);
+                    eastBound = myX + DETECTION_RANGE;
                     broadcastBorders("EAST");
                     state = State.EXPLORATION_COMPLETE;
-                } else {
-                    myMove();
+                    break;
                 }
+                if (blockedAhead()) {
+                    simpleAvoid(State.CHECKING_EAST);
+                    break;
+                }
+                myMove();
                 break;
 
             case EXPLORATION_COMPLETE:
-                consecutiveBlocked = 0;
+                avoidTurnCount = 0;
                 state = State.MOVE;
                 break;
 
             case MOVE:
-
-                // =====================================================
-                // 0) HIT STEER OVERRIDE (priority, forward only)
-                // =====================================================
-                if (hitSteerTicks > 0 && !Double.isNaN(hitSteerAngle)) {
-
-                    // If not facing escape direction -> turn using your normal TURNING_BACK
-                    if (!isSameDirection(myGetHeading(), hitSteerAngle)) {
-                        targetAngle = hitSteerAngle;
-                        state = State.TURNING_BACK;
-                        hitSteerTicks--; // still consumes time so it doesn't last forever
-                        break;
-                    }
-
-                    // If facing correct way -> move FORWARD away from bullets
-                    if (!blockedAhead()) {
-                        myMove();
-                        consecutiveBlocked = 0;
-                        hitSteerTicks--;
-                        break;
-                    }
-
-                    // If blocked -> do your normal roam turn, BUT keep hit steer active
-                    consecutiveBlocked++;
-                    targetAngle = normalize(myGetHeading() + ROAM_TURN_INCREMENT);
-                    if (consecutiveBlocked % 8 == 0) {
-                        targetAngle = normalize(myGetHeading() - ROAM_TURN_INCREMENT);
-                    }
-                    if (consecutiveBlocked > 30) {
-                        targetAngle = normalize(myGetHeading() + Math.PI);
-                        consecutiveBlocked = 0;
-                    }
-
-                    state = State.TURNING_BACK;
-                    hitSteerTicks--;
-                    break;
-                }
-
-                // =====================================================
-                // 1) Enemy panic-back already in progress
-                // =====================================================
-                if (evadeEnemySteps > 0) {
-                    myMoveBack();
-                    evadeEnemySteps--;
-                    break;
-                }
-
-                // Detect any enemy via radar
-                IRadarResult enemy = getFirstEnemy();
-
-                // A) broadcast enemy
-                if (enemy != null && enemyBroadcastCooldown == 0) {
-                    broadcastEnemyPosition(enemy);
-                    enemyBroadcastCooldown = ENEMY_BROADCAST_PERIOD;
-                }
-
-                // B) enemy too close -> run away (your existing behavior)
-                if (enemy != null && enemy.getObjectDistance() < ENEMY_MAINBOT_KEEP_DISTANCE) {
-                    evadeEnemySteps = EVADE_BACK_STEPS;
-                    targetAngle = normalize(enemy.getObjectDirection() + Math.PI);
-                    state = State.TURNING_BACK;
-                    break;
-                }
-
-                // 2) Yielding in progress
-                if (yieldBackSteps > 0) {
-                    myMoveBack();
-                    yieldBackSteps--;
-                    break;
-                }
-
-                // 3) main bot has priority
-                if (isBlockedByTeamMainBotOnlyFront()) {
-                    yieldBackSteps = YIELD_BACK_STEPS_MAIN;
-                    break;
-                }
-
-                // 4) secondary vs secondary deadlock breaker
-                if (isSecondaryBlockingFront()) {
-                    if (role == Role.EXPLORER_ALPHA) {
-                        yieldBackSteps = YIELD_BACK_STEPS_SECONDARY;
-                    } else {
-                        targetAngle = normalize(myGetHeading() + ROAM_TURN_INCREMENT);
-                        state = State.TURNING_BACK;
-                    }
-                    break;
-                }
-
-                // 5) Normal roaming
-                if (!blockedAhead()) {
-                    myMove();
-                    consecutiveBlocked = 0;
-                } else {
-                    consecutiveBlocked++;
-                    targetAngle = normalize(myGetHeading() + ROAM_TURN_INCREMENT);
-
-                    if (consecutiveBlocked % 8 == 0) {
-                        targetAngle = normalize(myGetHeading() - ROAM_TURN_INCREMENT);
-                    }
-                    if (consecutiveBlocked > 30) {
-                        targetAngle = normalize(myGetHeading() + Math.PI);
-                        consecutiveBlocked = 0;
-                    }
-
-                    state = State.TURNING_BACK;
-                }
+                // roaming uses the same avoidance rule
+                simpleAvoid(State.MOVE);
                 break;
 
             case TURNING_BACK:
                 if (!isSameDirection(myGetHeading(), targetAngle)) {
                     stepTurn(getTurnDirection(myGetHeading(), targetAngle));
                 } else {
-                    state = State.MOVE; // unchanged
+                    state = afterTurnState;
                 }
                 break;
 
@@ -405,12 +199,69 @@ public class RobotSecondaryB extends Brain {
         }
     }
 
+    // =========================
+    // SIMPLE AVOIDANCE
+    // =========================
+    private void simpleAvoid(State returnState) {
 
-    private Parameters.Direction getTurnDirection(double current, double target) {
-        double diff = normalize(target - current);
-        return (diff <= Math.PI) ? Parameters.Direction.RIGHT : Parameters.Direction.LEFT;
+        // Clear -> move and reset counters
+        if (!blockedAhead()) {
+            myMove();
+            avoidTurnCount = 0;
+            consecutiveBlocks = 0;
+            return;
+        }
+
+        // Blocked this tick
+        consecutiveBlocks++;
+
+        // =========================
+        // HARD ESCAPE after 5 blocks
+        // =========================
+        if (consecutiveBlocks >= BLOCK_ESCAPE_TRIGGER) {
+            // Step 1: back up a few ticks to get out of the squeeze
+            escapeBackSteps = ESCAPE_BACK_STEPS;
+
+            // Step 2: commit to a big turn (90°), alternate side each escape
+            avoidSide = -avoidSide;
+            targetAngle = normalize(myGetHeading() + avoidSide * ESCAPE_TURN);
+
+            // After the turn, go back to whatever state we were doing
+            afterTurnState = returnState;
+            state = State.TURNING_BACK;
+
+            // reset local scan counters so we don’t re-trigger instantly
+            consecutiveBlocks = 0;
+            avoidTurnCount = 0;
+            return;
+        }
+
+        // =========================
+        // Normal “turn bit by bit”
+        // =========================
+        avoidTurnCount++;
+        if (avoidTurnCount >= AVOID_MAX_TURNS) {
+            // one backstep + flip side (soft reset)
+            myMoveBack();
+            avoidTurnCount = 0;
+            avoidSide = -avoidSide;
+            return;
+        }
+
+        // small turn and try again next tick
+        targetAngle = normalize(myGetHeading() + avoidSide * AVOID_STEP);
+
+        // wiggle occasionally to avoid spiraling
+        if (avoidTurnCount % 6 == 0) avoidSide = -avoidSide;
+
+        afterTurnState = returnState;
+        state = State.TURNING_BACK;
     }
 
+
+    // =========================
+    // MOVEMENT + ODOMETRY
+    // =========================
     private void myMove() {
         isMoving = true;
         lastMoveWasBack = false;
@@ -423,106 +274,47 @@ public class RobotSecondaryB extends Brain {
         moveBack();
     }
 
-
     private void updateOdometry() {
-        boolean blockedByWall = detectWall();
-        boolean blockedByWreck = isBlockedByWreckObstacle();
-        boolean blockedByTeamMate = isBlockedByTeamMate();
-        boolean blockedByOpponent = isBlockedByOpponent();
+        if (!isMoving) return;
 
-        if (isMoving) {
-            if (!blockedByWall && !blockedByWreck && !blockedByTeamMate && !blockedByOpponent) {
-                double s = Parameters.teamBSecondaryBotSpeed;
-                if (lastMoveWasBack) s = -s;
-                myX += s * Math.cos(myGetHeading());
-                myY += s * Math.sin(myGetHeading());
-                sendLogMessage(robotName+ "(x=" + (int)myX + ", y=" + (int)myY + ")");
-            }
-            isMoving = false;
+        boolean blocked = blockedAhead(); // uses sensors/radar
+        if (!blocked) {
+            double s = Parameters.teamBSecondaryBotSpeed;
+            if (lastMoveWasBack) s = -s;
+
+            myX += s * Math.cos(myGetHeading());
+            myY += s * Math.sin(myGetHeading());
+            sendLogMessage(robotName + " (x=" + (int) myX + ", y=" + (int) myY + ")");
         }
 
+        isMoving = false;
+    }
+
+    // =========================
+    // TURN HELPERS
+    // =========================
+    private void turnToward(double angle, State next) {
+        if (isSameDirection(myGetHeading(), angle)) {
+            state = next;
+        } else {
+            stepTurn(getTurnDirection(myGetHeading(), angle));
+        }
+    }
+
+    private Parameters.Direction getTurnDirection(double current, double target) {
+        double diff = normalize(target - current);
+        return (diff <= Math.PI) ? Parameters.Direction.RIGHT : Parameters.Direction.LEFT;
     }
 
     private boolean isSameDirection(double dir1, double dir2) {
         return Math.abs(normalize(dir1) - normalize(dir2)) < ANGLE_PRECISION;
     }
-    private void damageTakenCheck() {
-        double h = getHealth();
-        if (lastHealth < 0) lastHealth = h;
-
-        // only trigger on DAMAGE (health goes down)
-        if (h < lastHealth) {
-
-            // BULLET steering has priority, short cooldown (prevents jitter)
-            if (hitSteerCooldown == 0) {
-                double bulletDir = getDominantBulletDirection();
-
-                // If bullets are visible: go opposite bullet flow
-                if (!Double.isNaN(bulletDir)) {
-                    hitSteerAngle = normalize(bulletDir + Math.PI);
-                    hitSteerTicks = HIT_STEER_TICKS;
-                    hitSteerCooldown = HIT_STEER_COOLDOWN;
-
-                    // force a turn toward escape heading
-                    targetAngle = hitSteerAngle;
-                    state = State.TURNING_BACK;
-
-                    // IMPORTANT: pause retreat while we escape (prevents fighting behaviors)
-                    retreatToMate = false;
-                }
-            }
-
-            // keep your old retreat logic too (but it won't fight when hit steer is active)
-            if (damageTakenCooldown == 0 && hitSteerTicks == 0) {
-                if (hasMatePos) {
-                    retreatToMate = true;
-                    retreatCooldown = RETREAT_COOLDOWN_STEPS;
-                    damageTakenCooldown = DAMAGE_TAKEN_COOLDOWN;
-                }
-            }
-        }
-
-        lastHealth = h;
-    }
-
-    private double getDominantBulletDirection() {
-        double[] bins = new double[BULLET_BINS];
-        boolean found = false;
-
-        for (IRadarResult o : detectRadar()) {
-            if (o.getObjectType() == IRadarResult.Types.BULLET) {
-                found = true;
-                double dir = normalize(o.getObjectDirection());
-                double d = Math.max(1.0, o.getObjectDistance());
-
-                // closer bullets count more
-                double w = 1.0 / (d * d);
-
-                int idx = (int) Math.floor((dir / (2 * Math.PI)) * BULLET_BINS);
-                if (idx < 0) idx = 0;
-                if (idx >= BULLET_BINS) idx = BULLET_BINS - 1;
-
-                bins[idx] += w;
-            }
-        }
-
-        if (!found) return Double.NaN;
-
-        int bestIdx = 0;
-        for (int i = 1; i < BULLET_BINS; i++) {
-            if (bins[i] > bins[bestIdx]) bestIdx = i;
-        }
-
-        double binWidth = (2 * Math.PI) / BULLET_BINS;
-        return normalize((bestIdx + 0.5) * binWidth);
-    }
-
 
     private double myGetHeading() {
-        double result = getHeading();
-        while (result < 0) result += 2 * Math.PI;
-        while (result > 2 * Math.PI) result -= 2 * Math.PI;
-        return result;
+        double h = getHeading();
+        while (h < 0) h += 2 * Math.PI;
+        while (h >= 2 * Math.PI) h -= 2 * Math.PI;
+        return h;
     }
 
     private double normalize(double dir) {
@@ -532,299 +324,114 @@ public class RobotSecondaryB extends Brain {
         return res;
     }
 
-    /*
-    BROADCAST FUNCTIONS
-     */
-    private void broadcastBorders(String border){
-        String msg = "";
-        switch(border) {
-            case "NORTH":
-                msg = "BORDER|NORTH|" + (int) northBound;
-                broadcast(msg);
-                break;
-            case "SOUTH":
-                msg = "BORDER|SOUTH|" + (int) southBound;
-                broadcast(msg);
-                break;
-            case "EAST":
-                msg = "BORDER|EAST|" + (int) eastBound;
-                broadcast(msg);
-                break;
-            case "WEST":
-                msg = "BORDER|WEST|" + (int) westBound;
-                broadcast(msg);
-                break;
-            default:
-                return;
+    // =========================
+    // BROADCAST + READ
+    // =========================
+    private void broadcastBorders(String border) {
+        int val;
+        switch (border) {
+            case "NORTH": val = (int) northBound; break;
+            case "SOUTH": val = (int) southBound; break;
+            case "WEST":  val = (int) westBound;  break;
+            case "EAST":  val = (int) eastBound;  break;
+            default: return;
         }
-    }
-    private void broadcastEnemyPosition(IRadarResult enemy){
-        double enemyAbsoluteX = myX + enemy.getObjectDistance() * Math.cos(enemy.getObjectDirection());
-        double enemyAbsoluteY = myY + enemy.getObjectDistance() * Math.sin(enemy.getObjectDirection());
-
-        // Broadcast both spotter position AND enemy position for smart convergence
-        String message = "SCOUT_ENEMY_LOCATION|" + robotName + "|" +
-                (int)myX + "|" + (int)myY + "|" +
-                (int)enemyAbsoluteX + "|" + (int)enemyAbsoluteY;
-        broadcast(message);
-        sendLogMessage(robotName + " broadcasting: I'm at (" + (int)myX + "," + (int)myY +
-                "), enemy at (" + (int)enemyAbsoluteX + "," + (int)enemyAbsoluteY + ")");
-
+        broadcast("BORDER|" + border + "|" + val);
     }
 
     private void readTeammateMessages() {
         ArrayList<String> messages = fetchAllMessages();
         for (String msg : messages) {
-            if (msg.startsWith("BORDER")) {
-                try {
-                    String[] parts = msg.split("\\|");
-                    if (parts.length == 3) {
-                        String borderType = parts[1];
-                        String position = parts[2];
-                        Integer pos = Integer.parseInt(position);
-                        sendLogMessage(robotName + " received border info: " + borderType + " at " + pos);
-                        switch (borderType) {
-                            case "NORTH":
-                                northBound = pos;
-                                break;
-                            case "SOUTH":
-                                southBound = pos;
-                                break;
-                            case "WEST":
-                                westBound = pos;
-                                break;
-                            case "EAST":
-                                eastBound = pos;
-                                break;
-                        }
-                    }
-                } catch (Exception e) {
-                    // ignore invalid message
+            if (!msg.startsWith("BORDER")) continue;
+            try {
+                String[] parts = msg.split("\\|");
+                if (parts.length != 3) continue;
+                String borderType = parts[1];
+                int pos = Integer.parseInt(parts[2]);
+
+                switch (borderType) {
+                    case "NORTH": northBound = pos; break;
+                    case "SOUTH": southBound = pos; break;
+                    case "WEST":  westBound  = pos; break;
+                    case "EAST":  eastBound  = pos; break;
                 }
-            }
-        }
-    }
-    private void meetAtPoint(double x, double y, double precision) {
-        double distance = Math.hypot(x - myX, y - myY);
-
-        if (distance < precision) {
-            retreatToMate = false; // arrived
-            state = State.MOVE;
-            return;
-        }
-
-        double angleToTarget = Math.atan2(y - myY, x - myX);
-
-        if (!isSameDirection(myGetHeading(), angleToTarget)) {
-            Parameters.Direction dir = getTurnDirection(myGetHeading(), angleToTarget);
-            stepTurn(dir);
-            return;
-        }
-
-        // Move if possible; if blocked, just do your roam-turn behavior
-        if (!blockedAhead()) {
-            myMove();
-        } else {
-            targetAngle = normalize(myGetHeading() + ROAM_TURN_INCREMENT);
-            state = State.TURNING_BACK;
+            } catch (Exception ignored) {}
         }
     }
 
-    private void scanTeamMates() {
-        double bestD = Double.POSITIVE_INFINITY;
-        double bestX = mateX, bestY = mateY;
-        boolean found = false;
-
-        for (IRadarResult o : detectRadar()) {
-            if (o.getObjectType() == IRadarResult.Types.TeamMainBot) {
-                double d = o.getObjectDistance();
-                if (d < bestD) {
-                    bestD = d;
-                    found = true;
-                    mateDistance = o.getObjectDistance();
-                    // This simplifies to using absolute direction:
-                    double dir = o.getObjectDirection();
-                    bestX = myX + d * Math.cos(dir);
-                    bestY = myY + d * Math.sin(dir);
-                }
-            }
-        }
-
-        if (found) {
-            mateX = bestX;
-            mateY = bestY;
-            hasMatePos = true;
-        }
-    }
-
-
-
-    /*
-    DETECTION FUNCTIONS
-     */
+    // =========================
+    // OBSTACLE DETECTION
+    // =========================
     private boolean detectWall() {
-        if (wallLatchActive) {
-            double traveled = dist(myX, myY, latchX, latchY);
-            if (traveled >= LATCH_WALLOFFSET) {
-                wallLatchActive = false;
-                latchJustCompleted = true;   // <- mark completion
-                return true;
-            }
-            return false;
-        }
         return detectFront().getObjectType() == IFrontSensorResult.Types.WALL;
     }
 
-    private boolean isInFront(double objDir) {
-        double relativeAngle = normalize(objDir - myGetHeading());
-        return relativeAngle < Math.PI / 4 || relativeAngle > (2 * Math.PI - Math.PI / 4);
-    }
-
-    private boolean isBehind(double objDir) {
-        double relativeAngle = normalize(objDir - myGetHeading());
-        return relativeAngle > (3 * Math.PI / 4) && relativeAngle < (5 * Math.PI / 4);
-    }
-
-    /*
-    Obstacle functions
-     */
-    private boolean obstacleCheck() {
-        return detectWall() || isBlockedByWreckObstacle() || isBlockedByTeamMate() || isBlockedByOpponent();
-    }
-
-    private boolean isBlockedByTeamMate() {
-        return isBlockedByTeamMainBot() || isBlockedBySecondaryBot();
-    }
-
-    private boolean isBlockedBySecondaryBot() {
-        for (IRadarResult o : detectRadar())
-            if ((o.getObjectType() == IRadarResult.Types.TeamSecondaryBot
-                    || o.getObjectType() == IRadarResult.Types.OpponentSecondaryBot)
-                    && isInFront(o.getObjectDirection())
-                    && !isBehind(o.getObjectDirection())
-                    && o.getObjectDistance() < DETECTION_RANGE) {
-                return true;
-            }
-        return false;
-    }
-
-    private boolean isBlockedByOpponent() {
-        for (IRadarResult o : detectRadar())
-            if ((o.getObjectType() == IRadarResult.Types.OpponentMainBot
-                    || o.getObjectType() == IRadarResult.Types.OpponentSecondaryBot)
-                    && isInFront(o.getObjectDirection())
-                    && !isBehind(o.getObjectDirection())
-                    && o.getObjectDistance() < DETECTION_RANGE) {
-                return true;
-            }
-        return false;
-    }
-
-    private boolean isBlockedByTeamMainBot() {
-        for (IRadarResult o : detectRadar())
-            if (o.getObjectType() == IRadarResult.Types.TeamMainBot
-                    && isInFront(o.getObjectDirection())
-                    && !isBehind(o.getObjectDirection())
-                    && o.getObjectDistance() < DETECTION_RANGE) {
-                return true;
-            }
-        return false;
-    }
-
     private boolean blockedAhead() {
-        return detectWall()
-                || isBlockedByWreckObstacle()
-                || isBlockedByTeamMate()
-                || isBlockedByOpponent();
+        // wall is handled below (with border logic)
+        if (wallBlocksNow()) return true;
+
+        return isRadarObstacleInFront(IRadarResult.Types.Wreck, DETECTION_RANGE)
+                || isRadarObstacleInFront(IRadarResult.Types.TeamMainBot, DETECTION_RANGE)
+                || isRadarObstacleInFront(IRadarResult.Types.OpponentMainBot, DETECTION_RANGE)
+                || isRadarObstacleInFront(IRadarResult.Types.OpponentSecondaryBot,
+                Math.max(0, DETECTION_RANGE - SECONDARY_CLOSER_MARGIN))
+                || isRadarObstacleInFront(IRadarResult.Types.TeamSecondaryBot,
+                Math.max(0, DETECTION_RANGE - SECONDARY_CLOSER_MARGIN));
     }
-    private boolean isBlockedByTeamMainBotOnlyFront() {
+
+
+    private boolean isRadarObstacleInFront(IRadarResult.Types type) {
         for (IRadarResult o : detectRadar()) {
-            if (o.getObjectType() == IRadarResult.Types.TeamMainBot
-                    && isInFront(o.getObjectDirection())
-                    && o.getObjectDistance() < 200) {   // tweak distance if needed
-                return true;
-            }
+            if (o.getObjectType() != type) continue;
+            if (o.getObjectDistance() >= DETECTION_RANGE) continue;
+            if (isInFront(o.getObjectDirection())) return true;
         }
         return false;
     }
 
-    private boolean isBlockedByWreckObstacle() {
-        for (IRadarResult o : detectRadar())
-            if (o.getObjectType() == IRadarResult.Types.Wreck
-                    && isInFront(o.getObjectDirection())
-                    && o.getObjectDistance() < DETECTION_RANGE) {
-                return true;
-            }
+    private boolean isInFront(double objDir) {
+        double rel = normalize(objDir - myGetHeading());
+        return rel < Math.PI / 4 || rel > (2 * Math.PI - Math.PI / 4);
+    }
+
+    private boolean wallBlocksNow() {
+        if (!detectWall()) return false;
+
+        // If we don't know the border yet, wall blocks normally
+        if (northBound < 0 && southBound < 0 && westBound < 0 && eastBound < 0) return true;
+
+        double h = myGetHeading();
+
+        // heading mostly NORTH: only block if we're near the known north bound
+        if (isSameDirection(h, Parameters.NORTH) && northBound >= 0) {
+            return myY <= northBound + WALL_BORDER_MARGIN;
+        }
+
+        // heading mostly SOUTH
+        if (isSameDirection(h, Parameters.SOUTH) && southBound >= 0) {
+            return myY >= southBound - WALL_BORDER_MARGIN;
+        }
+
+        // heading mostly WEST
+        if (isSameDirection(h, Parameters.WEST) && westBound >= 0) {
+            return myX <= westBound + WALL_BORDER_MARGIN;
+        }
+
+        // heading mostly EAST
+        if (isSameDirection(h, Parameters.EAST) && eastBound >= 0) {
+            return myX >= eastBound - WALL_BORDER_MARGIN;
+        }
+
+        // If heading isn't aligned with a known border direction, treat wall as blocking
+        return true;
+    }
+    private boolean isRadarObstacleInFront(IRadarResult.Types type, double range) {
+        for (IRadarResult o : detectRadar()) {
+            if (o.getObjectType() != type) continue;
+            if (o.getObjectDistance() >= range) continue;
+            if (isInFront(o.getObjectDirection())) return true;
+        }
         return false;
     }
-    private boolean isSecondaryBlockingFront() {
-        for (IRadarResult o : detectRadar()) {
-            if ((o.getObjectType() == IRadarResult.Types.TeamSecondaryBot
-                    || o.getObjectType() == IRadarResult.Types.OpponentSecondaryBot)
-                    && isInFront(o.getObjectDirection())
-                    && o.getObjectDistance() < YIELD_DISTANCE_SECONDARY) {
-                return true;
-            }
-        }
-        return false;
-    }
 
-    private IRadarResult getClosestEnemyMainBot() {
-        IRadarResult best = null;
-        double bestD = Double.POSITIVE_INFINITY;
-
-        for (IRadarResult o : detectRadar()) {
-            if (o.getObjectType() == IRadarResult.Types.OpponentMainBot) {
-                double d = o.getObjectDistance();
-                if (d < bestD) {
-                    bestD = d;
-                    best = o;
-                }
-            }
-        }
-        return best;
-    }
-
-    /*
-    UTILITY FUNCTIONS
-
-     */
-    private double dist(double x1, double y1, double x2, double y2) {
-        double dx = x1 - x2, dy = y1 - y2;
-        return Math.sqrt(dx*dx + dy*dy);
-    }
-
-    private void latchWallStart() {
-        latchX = myX;
-        latchY = myY;
-        wallLatchActive = true;
-    }
-
-    private IRadarResult getFirstEnemy() {
-        for (IRadarResult o : detectRadar()) {
-            if (o.getObjectType() == IRadarResult.Types.OpponentMainBot
-                    || o.getObjectType() == IRadarResult.Types.OpponentSecondaryBot) {
-                return o;
-            }
-        }
-        return null;
-    }
-
-
-    private void updateBorder(String border, double pos){
-        switch(border){
-            case "NORTH":
-                northBound = pos;
-                break;
-            case "SOUTH":
-                southBound = pos;
-                break;
-            case "WEST":
-                westBound = pos;
-                break;
-            case "EAST":
-                eastBound = pos;
-                break;
-        }
-    }
 }

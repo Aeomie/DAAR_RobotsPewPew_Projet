@@ -1,792 +1,527 @@
-package algorithms;
+    package algorithms;
 
-import characteristics.IFrontSensorResult;
-import characteristics.IRadarResult;
-import characteristics.Parameters;
-import robotsimulator.Brain;
+    import characteristics.IFrontSensorResult;
+    import characteristics.IRadarResult;
+    import characteristics.Parameters;
+    import robotsimulator.Brain;
 
-import java.util.ArrayList;
+    import java.util.ArrayList;
 
+    public class RobotB extends Brain {
 
-public class RobotB extends Brain {
+        private enum Role { WARIO, MARIO, LUIGI, UNDEFINED }
+        private enum State { IDLE, MOVING, ATTACKING, CONVERGING, STOPPED, EVADING }
 
+        // --- IDENTITY & STATE ---
+        private Role role = Role.UNDEFINED;
+        private String robotName = "Unknown";
+        private State state = State.IDLE;
 
-    private enum Role { WARIO, MARIO, LUIGI, UNDEFINED }
-    private enum State {
-        MOVE, TURNING, BACKING_UP, WAITING, ATTACKING, CONVERGING, IDLE, STOPPED,
-        AVOID_BACK, AVOID_TURN, AVOID_FORWARD
-    }
+        // --- POSITION & MOVEMENT ---
+        private double myX, myY;
+        private double targetX = -1, targetY = -1;
+        private double targetAngle;
+        private double targetPrecision = 100;
+        private int moveSign = 0; // +1 forward, -1 backward, 0 none
 
-    // --- VARIABLES ---
-    private Role role = Role.UNDEFINED;
-    private String robotName = "Unknown";
-    private State state = State.IDLE;
+        // --- TIMING & COUNTERS ---
+        private int evadeSteps = 0;
+        private int consecutiveBlocked = 0;
+        private int stepsSinceEnemyUpdate = 0;
+        private int noEnemySignalCooldown = 0;
 
-    private double myX, myY;
-    private double targetAngle;
+        // --- CONSTANTS ---
+        private static final double ANGLE_PRECISION = 0.1;
+        private static final double TURN_INCREMENT = Math.PI / 6; // 30°
+        private static final int ENEMY_INFO_EXPIRY = 20;
+        private static final int STOPPED_TIME = 300;
+        private static final int EVADE_DURATION = 15;
 
-    // --- ODOMETRY MOVE FLAG ---
-    // +1 forward, -1 backward, 0 none
-    private int moveSign = 0;
+        // Detection ranges
+        private static final int ENEMY_RANGE = 400;
+        private static final int WRECK_RANGE = 100;
+        private static final int TEAMMATE_RANGE = 120;
+        private static final int SCOUT_RANGE = 80;
 
-    private int backupSteps = 0;
-    private int consecutiveBlocked = 0;
-    private int waitCounter = 0;
+        // Tactical positioning
+        private static final double FLANK_OFFSET_X = 150;
 
-    private static final double ANGLE_PRECISION = 0.1;
-    private static final int MAX_BACKUP_STEPS = 3;
-    private static final int MAX_WAIT_TIME = 5;
+        // Map bounds
+        private double northBound = -1, westBound = -1, eastBound = -1, southBound = -1;
+        private double DEFAULTX = 0, DEFAULTY = 0;
+        private static final double BORDER_MARGIN = 100.0;
 
-    // ✅ SMALL TURN LIKE SECONDARY
-    private static final double TURN_INCREMENT = Math.PI / 6; // 30°
+        // --- SHARED ENEMY TRACKING ---
+        private double sharedEnemyX = -1;
+        private double sharedEnemyY = -1;
 
-    // --- TACTICAL POSITIONING ---
-    private static final double FLANK_OFFSET_X = 150;
-    private static final double FLANK_OFFSET_Y = 100;
+        // --- WRECK MEMORY ---
+        private static class WreckInfo {
+            double x, y;
+            WreckInfo(double x, double y) { this.x = x; this.y = y; }
+        }
+        private final ArrayList<WreckInfo> knownWrecks = new ArrayList<>();
+        private static final double WRECK_TOLERANCE = 25.0;
 
-    // --- SHARED ENEMY TRACKING ---
-    private double sharedEnemyX = -1;
-    private double sharedEnemyY = -1;
-    private int stepsSinceEnemyUpdate = 0;
-    private static final int ENEMY_INFO_EXPIRY = 20;
+        @Override
+        public void activate() {
+            identifyRole();
+            DEFAULTX = Parameters.teamBMainBot2InitX - 300;
+            DEFAULTY = Parameters.teamBMainBot2InitY;
 
-    // --- DETECTION RANGES ---
-    private static final int ENEMY_DETECTION_DISTANCE = 400;
-    private static final int WRECK_DETECTION_DISTANCE = 100;
-    private static final int TEAMMATE_DETECTION_DISTANCE = 120;
-    private static final int SECONDARY_BOT_DETECTION_DISTANCE = 80;
+            state = State.STOPPED;
+            targetAngle = myGetHeading();
+            noEnemySignalCooldown = STOPPED_TIME;
+            knownWrecks.clear();
+        }
 
-    // STOPPED TIME
-    private static final int STOPPED_TIME = 300;
-    private int noEnemySignalCooldown = 0;
+        public void identifyRole() {
+            // Determine identity by radar
+            boolean seesNorth = false, seesSouth = false;
+            for (IRadarResult o : detectRadar()) {
+                if (o.getObjectType() == IRadarResult.Types.TeamMainBot) {
+                    if (isSameDirection(o.getObjectDirection(), Parameters.NORTH)) seesNorth = true;
+                    if (isSameDirection(o.getObjectDirection(), Parameters.SOUTH)) seesSouth = true;
+                }
+            }
 
-    // Map bounds discovered (kept for your existing comms)
-    private double northBound = -1;
-    private double westBound = -1;
-    private double eastBound = -1;
-    private double southBound = -1;
+            int whoAmI = seesNorth && !seesSouth ? 3 : (seesSouth && !seesNorth ? 1 : 2);
 
-    private double DEFAULTX = 0;
-    private double DEFAULTY = 0;
-
-    // --- AVOIDANCE MEMORY ---
-    private State resumeState = State.MOVE;     // where to go back after avoiding
-    private double resumeX = -1, resumeY = -1;  // goal to continue (for converging)
-    private double resumePrecision = 100;
-
-    private int avoidBackSteps = 0;
-    private int avoidForwardSteps = 0;
-
-    private static final int AVOID_BACK_STEPS = 5;      // tweak 3–8
-    private static final int AVOID_FORWARD_STEPS = 10;  // tweak 6–15
-    private static final double BORDER_MARGIN = 100.0;
-    // ✅ NEW: Flag to skip obstacle avoidance for special cases
-    private boolean skipObstacleAvoidance = false;
-
-    // --- WRECK MEMORY ---
-    private static class WreckInfo {
-        double x, y;
-        WreckInfo(double x, double y) { this.x = x; this.y = y; }
-    }
-    private final ArrayList<WreckInfo> knownWrecks = new ArrayList<>();
-    private static final double WRECK_SAME_POS_EPS = 25.0; // tweak 10–40
-
-    @Override
-    public void activate() {
-        boolean seesNorth = false;
-        boolean seesSouth = false;
-
-        for (IRadarResult o : detectRadar()) {
-            if (o.getObjectType() == IRadarResult.Types.TeamMainBot) {
-                if (isSameDirection(o.getObjectDirection(), Parameters.NORTH)) seesNorth = true;
-                if (isSameDirection(o.getObjectDirection(), Parameters.SOUTH)) seesSouth = true;
+            switch (whoAmI) {
+                case 1:
+                    myX = Parameters.teamBMainBot1InitX;
+                    myY = Parameters.teamBMainBot1InitY;
+                    robotName = "WARIO";
+                    role = Role.WARIO;
+                    break;
+                case 2:
+                    myX = Parameters.teamBMainBot2InitX;
+                    myY = Parameters.teamBMainBot2InitY;
+                    robotName = "MARIO";
+                    role = Role.MARIO;
+                    break;
+                case 3:
+                    myX = Parameters.teamBMainBot3InitX;
+                    myY = Parameters.teamBMainBot3InitY;
+                    robotName = "LUIGI";
+                    role = Role.LUIGI;
+                    break;
             }
         }
 
-        int whoAmI;
-        if (seesNorth && !seesSouth) {
-            whoAmI = 3; // Bottom , LUIGI
-        } else if (seesSouth && !seesNorth) {
-            whoAmI = 1; // Top , WARIO
-        } else {
-            whoAmI = 2; // Middle , MARIO
-        }
+        @Override
+        public void step() {
+            updateOdometry();
+            rememberWrecks();
+            readTeammateMessages();
 
-        if (whoAmI == 1) {
-            myX = Parameters.teamBMainBot1InitX;
-            myY = Parameters.teamBMainBot1InitY;
-            robotName = "WARIO";
-            role = Role.WARIO;
-        }
-        if (whoAmI == 2) {
-            myX = Parameters.teamBMainBot2InitX;
-            myY = Parameters.teamBMainBot2InitY;
-            robotName = "MARIO";
-            role = Role.MARIO;
-        }
-        if (whoAmI == 3) {
-            myX = Parameters.teamBMainBot3InitX;
-            myY = Parameters.teamBMainBot3InitY;
-            robotName = "LUIGI";
-            role = Role.LUIGI;
-        }
+            // Update enemy info expiry
+            if (++stepsSinceEnemyUpdate > ENEMY_INFO_EXPIRY) {
+                sharedEnemyX = sharedEnemyY = -1;
+                if (state == State.CONVERGING) state = State.MOVING;
+            }
 
-        DEFAULTX = Parameters.teamBMainBot2InitX - 300; // For B its - & for A its +
-        DEFAULTY = Parameters.teamBMainBot2InitY;
-//        sendLogMessage("=== I AM " + robotName + "! ===");
+            noEnemySignalCooldown = Math.max(0, noEnemySignalCooldown - 1);
 
-        state = State.STOPPED;
+            // Priority: attacking overrides everything
+            if (enemyCheck() && state != State.ATTACKING) {
+                state = State.ATTACKING;
+            }
 
-        moveSign = 0;
-        targetAngle = myGetHeading();
-        noEnemySignalCooldown = STOPPED_TIME;
-
-        // reset avoid memory
-        resumeState = State.MOVE;
-        resumeX = resumeY = -1;
-        resumePrecision = 100;
-        avoidBackSteps = avoidForwardSteps = 0;
-        backupSteps = 0;
-        consecutiveBlocked = 0;
-        waitCounter = 0;
-        skipObstacleAvoidance = false;
-
-        knownWrecks.clear();
-
-    }
-
-    @Override
-    public void step() {
-        updateOdometry();
-        rememberWrecks();
-        readTeammateMessages();
-
-        // if sees enemy, attack
-        if (enemyCheck() && state != State.ATTACKING) {
-            state = State.ATTACKING;
-        }
-
-        // expire shared enemy info
-        stepsSinceEnemyUpdate++;
-        if (stepsSinceEnemyUpdate > ENEMY_INFO_EXPIRY) {
-            sharedEnemyX = -1;
-            sharedEnemyY = -1;
-            if (state == State.CONVERGING) state = State.MOVE;
-        }
-
-        noEnemySignalCooldown = Math.max(0, noEnemySignalCooldown - 1);
-
-        switch (state) {
-            case STOPPED:
-                if (sharedEnemyX != -1) { state = State.CONVERGING; break; }
-                if (enemyCheck()) { state = State.ATTACKING; break; }
-                if (noEnemySignalCooldown == 0) state = State.MOVE;
-                break;
-
-            case IDLE:
-                state = State.MOVE;
-                consecutiveBlocked = 0;
-                break;
-
-            case MOVE:
-                // teammate found enemy -> converge
-                if (sharedEnemyX != -1 && !enemyCheck()) {
-                    state = State.CONVERGING;
+            switch (state) {
+                case STOPPED:
+                    if (noEnemySignalCooldown <= 0) state = State.IDLE;
                     break;
-                }
 
-                if (enemyCheck()) { state = State.ATTACKING; break; }
-
-                // ✅ NOW OBSTACLES ARE ALWAYS CHECKED INSIDE moveWithObstacleDetection()
-                moveWithObstacleDetection();
-                break;
-
-            case CONVERGING:
-                if (sharedEnemyX != -1) {
-                    meetAtPointSafe(sharedEnemyX, sharedEnemyY, 100);
-                } else {
-                    state = State.MOVE;
-                }
-                if (enemyCheck()) state = State.ATTACKING;
-                break;
-
-            case ATTACKING:
-                if (enemyCheck()) shootEnemy();
-                else meetAtPointSafe(DEFAULTX, DEFAULTY, 100); // go back to default position
-                break;
-
-            case WAITING:
-                waitCounter++;
-                if (waitCounter >= MAX_WAIT_TIME) {
-                    state = State.BACKING_UP;
-                    backupSteps = 0;
-                    waitCounter = 0;
-                } else if (!isBlockedByTeamMainBotOnly()) {
-                    state = State.MOVE;
-                    waitCounter = 0;
-                }
-                break;
-
-            // keep your old backup for "generic" (still useful sometimes)
-            case BACKING_UP:
-                if (backupSteps < MAX_BACKUP_STEPS) {
-                    myMoveBack();
-                    backupSteps++;
-                } else {
-                    state = State.TURNING;
-                    targetAngle = calculateAvoidanceAngleSmall();
-                }
-                break;
-
-            case TURNING:
-                if (isSameDirection(myGetHeading(), targetAngle)) {
-                    state = State.MOVE;
-                } else {
-                    turnTowards(targetAngle);
-                }
-                break;
-
-            // ===== NEW AVOIDANCE MACHINE (SIDESTEP) =====
-            case AVOID_BACK:
-                if (avoidBackSteps > 0) {
-                    myMoveBack();
-                    avoidBackSteps--;
-                } else {
-                    targetAngle = calculateAvoidanceAngleSmall();
-                    state = State.AVOID_TURN;
-                }
-                break;
-
-            case AVOID_TURN:
-                if (isSameDirection(myGetHeading(), targetAngle)) {
-                    state = State.AVOID_FORWARD;
-                } else {
-                    turnTowards(targetAngle);
-                }
-                break;
-
-            case AVOID_FORWARD:
-                if (avoidForwardSteps > 0) {
-                    moveWithObstacleDetection(); // ✅ Use unified method
-                    if (consecutiveBlocked == 0) { // Only decrement if successful
-                        avoidForwardSteps--;
-                    } else {
-                        // Still blocked: re-avoid
-                        avoidBackSteps = AVOID_BACK_STEPS;
-                        state = State.AVOID_BACK;
-                    }
-                } else {
-                    // resume mission
-                    if (resumeState == State.CONVERGING) {
+                case IDLE:
+                    if (sharedEnemyX != -1 && sharedEnemyY != -1) {
+                        setTarget(sharedEnemyX, sharedEnemyY, 100);
                         state = State.CONVERGING;
                     } else {
-                        state = State.MOVE;
+                        setTarget(DEFAULTX, DEFAULTY, 100);
+                        state = State.MOVING;
                     }
+                    break;
+
+                case MOVING:
+                case CONVERGING:
+                    if (!moveToTarget()) {
+                        startEvasion();
+                    }
+                    break;
+
+                case ATTACKING:
+                    shootEnemy();
+                    if (!enemyCheck()) {
+                        state = sharedEnemyX != -1 ? State.CONVERGING : State.MOVING;
+                    }
+                    break;
+
+                case EVADING:
+                    if (evadeSteps > 0) {
+                        performEvasion();
+                        evadeSteps--;
+                    } else {
+                        // Resume previous mission
+                        state = (sharedEnemyX != -1) ? State.CONVERGING : State.MOVING;
+                        consecutiveBlocked = 0;
+                    }
+                    break;
+            }
+        }
+
+        // ============================================================
+        // UNIFIED MOVEMENT SYSTEM
+        // ============================================================
+
+        private void setTarget(double x, double y, double precision) {
+            targetX = x;
+            targetY = y;
+            targetPrecision = precision;
+        }
+
+        /**
+         * Move towards current target. Returns false if blocked.
+         */
+        private boolean moveToTarget() {
+            if (targetX == -1 || targetY == -1) return true;
+
+            double distance = Math.hypot(targetX - myX, targetY - myY);
+
+            // Reached target
+            if (distance < targetPrecision) {
+                if (targetX == DEFAULTX && targetY == DEFAULTY) {
+                    state = State.STOPPED;
+                    noEnemySignalCooldown = STOPPED_TIME;
+                } else {
+                    state = State.MOVING;
                 }
-                break;
-        }
-    }
+                return true;
+            }
 
-    // ============================================================
-    // ===== ✅ NEW UNIFIED MOVEMENT METHODS =====
-    // ============================================================
+            // Calculate angle to target
+            double angleToTarget = Math.atan2(targetY - myY, targetX - myX);
 
-    /**
-     * Universal movement method - checks obstacles before moving
-     * Call this instead of myMove() everywhere
-     */
-    private void moveWithObstacleDetection() {
-        // Skip obstacle check for specific states if needed
-        if (skipObstacleAvoidance) {
-            myMove();
-            return;
-        }
+            // Turn if needed
+            if (!isSameDirection(myGetHeading(), angleToTarget)) {
+                turnTowards(angleToTarget);
+                return true;
+            }
 
-        if (!obstacleCheck()) {
-            myMove();
-            consecutiveBlocked = 0;
-        } else {
+            // Move if clear, otherwise signal blockage
+            if (!isBlocked()) {
+                myMove();
+                consecutiveBlocked = 0;
+                return true;
+            }
+
             consecutiveBlocked++;
-            // Trigger avoidance based on current state
-            handleObstacleAvoidance();
+            return false;
         }
-    }
 
-    /**
-     * Handles obstacle avoidance based on current state context
-     */
-    private void handleObstacleAvoidance() {
-        switch (state) {
-            case MOVE:
-                startAvoiding(State.MOVE, -1, -1, 0);
-                break;
-
-            case CONVERGING:
-                // Keep the converging goal when avoiding
-                startAvoiding(State.CONVERGING, sharedEnemyX, sharedEnemyY, 100);
-                break;
-
-            case ATTACKING:
-                // When attacking, just do simple backup-turn
-                state = State.BACKING_UP;
-                backupSteps = 0;
-                break;
-
-            // Add other states as needed
-            default:
-                // Generic fallback: backup and turn
-                startAvoiding(state, -1, -1, 0);
-                break;
-        }
-    }
-
-    /**
-     * Turn towards target with obstacle awareness
-     */
-    private void turnTowards(double targetAngle) {
-        if (!isSameDirection(myGetHeading(), targetAngle)) {
-            Parameters.Direction dir = getTurnDirection(myGetHeading(), targetAngle);
+        private void turnTowards(double targetAngle) {
+            double diff = normalize(targetAngle - myGetHeading());
+            Parameters.Direction dir = (diff < Math.PI) ? Parameters.Direction.RIGHT : Parameters.Direction.LEFT;
             stepTurn(dir);
         }
-    }
 
-    /**
-     * Safe version of meetAtPoint - uses unified obstacle detection
-     */
-    private void meetAtPointSafe(double x, double y, double precision) {
-        double distance = Math.hypot(x - myX, y - myY);
+        // ============================================================
+        // EVASION SYSTEM
+        // ============================================================
 
-        if (distance < precision) {
-//            sendLogMessage(robotName + " >>> Arrived near target!");
-            if(x == DEFAULTX && y == DEFAULTY){
-                state = State.STOPPED;
-                noEnemySignalCooldown = STOPPED_TIME;
-                return;
-            }
-            state = State.MOVE;
-            return;
+        private void startEvasion() {
+            state = State.EVADING;
+            evadeSteps = EVADE_DURATION;
+            targetAngle = calculateEvasionAngle();
+            sendLogMessage(robotName + " >>> Starting evasion");
         }
 
-        double angleToTarget = Math.atan2(y - myY, x - myX);
-
-        if (!isSameDirection(myGetHeading(), angleToTarget)) {
-            turnTowards(angleToTarget);
-            return;
+        private void performEvasion() {
+            // First half: back up
+            if (evadeSteps > EVADE_DURATION / 2) {
+                myMoveBack();
+            }
+            // Second half: turn and advance
+            else {
+                if (!isSameDirection(myGetHeading(), targetAngle)) {
+                    turnTowards(targetAngle);
+                } else {
+                    myMove();
+                }
+            }
         }
 
-        // ✅ OBSTACLES AUTOMATICALLY HANDLED
-        moveWithObstacleDetection();
-    }
+        private double calculateEvasionAngle() {
+            double heading = myGetHeading();
 
-    // === AVOIDANCE MEMORY ===
-
-    private void startAvoiding(State comeBackTo, double gx, double gy, double prec) {
-        resumeState = comeBackTo;
-        resumeX = gx;
-        resumeY = gy;
-        resumePrecision = prec;
-
-        avoidBackSteps = AVOID_BACK_STEPS;
-        avoidForwardSteps = AVOID_FORWARD_STEPS;
-
-        state = State.AVOID_BACK;
-    }
-
-    // ✅ SMALL-TURN AVOIDANCE (30° targets)
-    private double calculateAvoidanceAngleSmall() {
-        double heading = myGetHeading();
-        int leftObs = 0, rightObs = 0;
-
-        if (detectFront().getObjectType() == IFrontSensorResult.Types.WALL) {
-
-            // If we are actively engaging (enemy around), do NOT use border logic.
-            // Just get off the wall quickly.
-            if (enemyCheck()) {
-                return directWallTurn(heading);
+            // Wall handling
+            if (detectFront().getObjectType() == IFrontSensorResult.Types.WALL) {
+                if (nearKnownBorder()) return angleTowardKnownCenter();
+                return normalize(heading + (consecutiveBlocked % 2 == 0 ? Math.PI / 2 : -Math.PI / 2));
             }
 
-            // No enemy pressure:
-            // If we're close to a border we already know => treat as border wall, turn inward (center).
-            if (nearKnownBorder()) {
-                return normalize(angleTowardKnownCenter());
-            }
+            // Scan obstacles
+            int leftScore = 0, rightScore = 0;
+            for (IRadarResult o : detectRadar()) {
+                if (isBehind(o.getObjectDirection()) || o.getObjectDistance() > 250) continue;
 
-            // Otherwise it's probably an unknown border (or we haven't learned it yet):
-            // turn directly (fast).
-            return directWallTurn(heading);
-        }
-
-        for (IRadarResult o : detectRadar()) {
-            if (isBehind(o.getObjectDirection())) continue;
-            if (o.getObjectDistance() <= 250) {
                 double rel = normalize(o.getObjectDirection() - heading);
-                if (rel > 0 && rel < Math.PI) rightObs++;
-                else leftObs++;
+                boolean isLeft = (rel > Math.PI);
+                int weight = (o.getObjectType() == IRadarResult.Types.Wreck) ? 2 : 1;
+
+                if (isLeft) leftScore += weight;
+                else rightScore += weight;
+            }
+
+            // Choose less crowded side
+            if (leftScore < rightScore) return normalize(heading - TURN_INCREMENT);
+            if (rightScore < leftScore) return normalize(heading + TURN_INCREMENT);
+            return normalize(heading + (consecutiveBlocked % 2 == 0 ? TURN_INCREMENT : -TURN_INCREMENT));
+        }
+
+        // ============================================================
+        // ODOMETRY & BASIC MOVEMENT
+        // ============================================================
+
+        private void updateOdometry() {
+            if (moveSign != 0) {
+                boolean blocked = isBlockedByWreck() || isBlockedByTeammate() || isBlockedByOpponent()
+                        || (moveSign > 0 && detectWall());
+
+                if (!blocked) {
+                    double step = Parameters.teamAMainBotSpeed * moveSign;
+                    myX += step * Math.cos(myGetHeading());
+                    myY += step * Math.sin(myGetHeading());
+                }
+                moveSign = 0;
             }
         }
 
-        // pick the less crowded side
-        if (leftObs < rightObs) return normalize(heading - TURN_INCREMENT);
-        if (rightObs < leftObs) return normalize(heading + TURN_INCREMENT);
+        private void myMove() {
+            moveSign = 1;
+            move();
+        }
 
-        // tie-breaker: alternate using consecutiveBlocked
-        if (consecutiveBlocked % 2 == 0) return normalize(heading + TURN_INCREMENT);
-        return normalize(heading - TURN_INCREMENT);
-    }
+        private void myMoveBack() {
+            moveSign = -1;
+            moveBack();
+        }
 
-    private Parameters.Direction getTurnDirection(double current, double target) {
-        double diff = normalize(target - current);
-        return (diff < Math.PI) ? Parameters.Direction.RIGHT : Parameters.Direction.LEFT;
-    }
+        // ============================================================
+        // DETECTION METHODS
+        // ============================================================
 
-    // === ODOMETRY + MOVE WRAPPERS ===
+        private boolean isBlocked() {
+            return detectWall() || isBlockedByWreck() || isBlockedByTeammate() || isBlockedByOpponent();
+        }
 
-    private void updateOdometry() {
-        boolean blockedByWall = detectWall();
-        boolean blockedByWreck = isBlockedByWreckObstacle();
-        boolean blockedByTeamMate = isBlockedByTeamMate();
-        boolean blockedByOpponent = isBlockedByOpponent();
-        sendLogMessage("WEST: " + westBound + " EAST: " + eastBound + " NORTH: " + northBound + " SOUTH: " + southBound);
-        if (moveSign != 0) {
-            // if moving forward and blocked, don't integrate.
-            // if moving back, we ignore "front wall" sensor; still can be blocked by bots/wrecks though
-            boolean blocked = (blockedByWreck || blockedByTeamMate || blockedByOpponent || (moveSign > 0 && blockedByWall));
+        private boolean detectWall() {
+            return detectFront().getObjectType() == IFrontSensorResult.Types.WALL;
+        }
 
-            if (!blocked) {
-                double step = Parameters.teamAMainBotSpeed * moveSign;
-                myX += step * Math.cos(myGetHeading());
-                myY += step * Math.sin(myGetHeading());
+        private boolean isBlockedByWreck() {
+            return detectInFront(IRadarResult.Types.Wreck, WRECK_RANGE);
+        }
+
+        private boolean isBlockedByTeammate() {
+            return detectInFront(IRadarResult.Types.TeamMainBot, TEAMMATE_RANGE)
+                    || detectInFront(IRadarResult.Types.TeamSecondaryBot, SCOUT_RANGE)
+                    || detectInFront(IRadarResult.Types.OpponentSecondaryBot, SCOUT_RANGE);
+        }
+
+        private boolean isBlockedByOpponent() {
+            return detectInFront(IRadarResult.Types.OpponentMainBot, ENEMY_RANGE)
+                    || detectInFront(IRadarResult.Types.OpponentSecondaryBot, ENEMY_RANGE);
+        }
+
+        private boolean detectInFront(IRadarResult.Types type, int range) {
+            for (IRadarResult o : detectRadar()) {
+                if (o.getObjectType() == type && isInFront(o.getObjectDirection())
+                        && !isBehind(o.getObjectDirection()) && o.getObjectDistance() < range) {
+                    return true;
+                }
             }
-
-            moveSign = 0;
-        }
-    }
-
-    private void myMove() {
-        moveSign = +1;
-        move();
-    }
-
-    private void myMoveBack() {
-        moveSign = -1;
-        moveBack();
-    }
-
-    // === COMBAT METHODS ===
-
-    private void shootEnemy() {
-        ArrayList<IRadarResult> enemiesShooters = new ArrayList<>();
-        ArrayList<IRadarResult> enemiesScouts = new ArrayList<>();
-
-        for (IRadarResult o : detectRadar()) {
-            if ((o.getObjectType() == IRadarResult.Types.OpponentMainBot ||
-                    o.getObjectType() == IRadarResult.Types.OpponentSecondaryBot) &&
-                    o.getObjectDistance() <= ENEMY_DETECTION_DISTANCE) {
-
-                if (isBlockedByWreck(o.getObjectDirection(), o.getObjectDistance())) continue;
-
-                if (o.getObjectType() == IRadarResult.Types.OpponentMainBot) enemiesShooters.add(o);
-                else enemiesScouts.add(o);
-            }
+            return false;
         }
 
-        if (!enemiesShooters.isEmpty()) {
-            IRadarResult target = enemiesShooters.get(0);
-            for (IRadarResult e : enemiesShooters)
-                if (e.getObjectDistance() < target.getObjectDistance()) target = e;
-
-            fire(target.getObjectDirection());
-            broadcastEnemyPosition(target);
-
-        } else if (!enemiesScouts.isEmpty()) {
-            IRadarResult target = enemiesScouts.get(0);
-            for (IRadarResult e : enemiesScouts)
-                if (e.getObjectDistance() < target.getObjectDistance()) target = e;
-
-            fire(target.getObjectDirection());
-            broadcastEnemyPosition(target);
+        private boolean isInFront(double objDir) {
+            double relativeAngle = normalize(objDir - myGetHeading());
+            return relativeAngle < Math.PI / 4 || relativeAngle > (2 * Math.PI - Math.PI / 4);
         }
-    }
 
-    private boolean enemyCheck() {
-        for (IRadarResult o : detectRadar()) {
-            if ((o.getObjectType() == IRadarResult.Types.OpponentMainBot ||
-                    o.getObjectType() == IRadarResult.Types.OpponentSecondaryBot) &&
-                    o.getObjectDistance() <= ENEMY_DETECTION_DISTANCE) {
-
-                if (isBlockedByWreck(o.getObjectDirection(), o.getObjectDistance())) continue;
-                return true;
-            }
+        private boolean isBehind(double objDir) {
+            double relativeAngle = normalize(objDir - myGetHeading());
+            return relativeAngle > (3 * Math.PI / 4) && relativeAngle < (5 * Math.PI / 4);
         }
-        return false;
-    }
 
-    private boolean isBlockedByWreck(double enemyDirection, double enemyDistance) {
-        double botRadius = Parameters.teamAMainBotRadius;
+        // ============================================================
+        // COMBAT METHODS
+        // ============================================================
 
-        for (IRadarResult wreck : detectRadar()) {
-            if (wreck.getObjectType() == IRadarResult.Types.Wreck &&
-                    wreck.getObjectDistance() < enemyDistance) {
+        private void shootEnemy() {
+            IRadarResult target = null;
+            boolean foundShooter = false;
 
-                double angularWidth = Math.atan(botRadius / wreck.getObjectDistance());
-                double angleDiff = Math.abs(normalize(wreck.getObjectDirection() - enemyDirection));
-                if (angleDiff > Math.PI) angleDiff = 2 * Math.PI - angleDiff;
+            for (IRadarResult o : detectRadar()) {
+                if ((o.getObjectType() == IRadarResult.Types.OpponentMainBot
+                        || o.getObjectType() == IRadarResult.Types.OpponentSecondaryBot)
+                        && o.getObjectDistance() <= ENEMY_RANGE) {
 
-                if (angleDiff <= angularWidth) return true;
-            }
-        }
-        return false;
-    }
+                    if (isBlockedByWreckLine(o.getObjectDirection(), o.getObjectDistance())) continue;
 
-    // === COMMUNICATION METHODS ===
-
-    private void broadcastEnemyPosition(IRadarResult enemy) {
-        double enemyAbsoluteX = myX + enemy.getObjectDistance() * Math.cos(enemy.getObjectDirection());
-        double enemyAbsoluteY = myY + enemy.getObjectDistance() * Math.sin(enemy.getObjectDirection());
-
-        String message = "ENEMY_LOCATION|" + robotName + "|" +
-                (int) myX + "|" + (int) myY + "|" +
-                (int) enemyAbsoluteX + "|" + (int) enemyAbsoluteY;
-        broadcast(message);
-    }
-
-    private void readTeammateMessages() {
-        ArrayList<String> messages = fetchAllMessages();
-
-        for (String msg : messages) {
-            if (msg.startsWith("ENEMY_LOCATION|")) {
-                try {
-                    String[] parts = msg.split("\\|");
-                    if (parts.length == 6) {
-                        String spotter = parts[1];
-                        if (robotName.equals(spotter)) continue;
-
-                        double enemyX = Double.parseDouble(parts[4]);
-                        double enemyY = Double.parseDouble(parts[5]);
-                        stepsSinceEnemyUpdate = 0;
-
-                        applyFormationOffset(spotter, enemyX, enemyY);
+                    boolean isShooter = (o.getObjectType() == IRadarResult.Types.OpponentMainBot);
+                    if (target == null || (isShooter && !foundShooter) || o.getObjectDistance() < target.getObjectDistance()) {
+                        target = o;
+                        foundShooter = isShooter;
                     }
-                } catch (Exception ignored) {}
-            }
-
-            if (msg.startsWith("BORDER")) {
-                try {
-                    String[] parts = msg.split("\\|");
-                    if (parts.length == 3) {
-                        String borderType = parts[1];
-                        int pos = Integer.parseInt(parts[2]);
-                        switch (borderType) {
-                            case "NORTH": northBound = pos; break;
-                            case "SOUTH": southBound = pos; break;
-                            case "WEST":  westBound = pos;  break;
-                            case "EAST":  eastBound = pos;  break;
-                        }
-                    }
-                } catch (Exception ignored) {}
-            }
-
-            if (msg.startsWith("SCOUT_ENEMY_LOCATION")) {
-                try {
-                    String[] parts = msg.split("\\|");
-                    if (parts.length == 6) {
-                        String spotter = parts[1];
-                        double enemyX = Double.parseDouble(parts[4]);
-                        double enemyY = Double.parseDouble(parts[5]);
-                        stepsSinceEnemyUpdate = 0;
-
-                        applyFormationOffset(spotter, enemyX, enemyY);
-                    }
-                } catch (Exception ignored) {}
-            }
-        }
-    }
-
-    private void applyFormationOffset(String spotter, double targetX, double targetY) {
-        int spotterPosition = getRolePosition(spotter);
-        int myPosition = getRolePosition(robotName);
-
-        int relativeOffset = (myPosition - spotterPosition);
-
-        sharedEnemyX = targetX + (relativeOffset * FLANK_OFFSET_X);
-        sharedEnemyY = targetY;
-    }
-
-    private int getRolePosition(String name) {
-        switch (name) {
-            case "WARIO": return -1;
-            case "MARIO": return 0;
-            case "LUIGI": return 1;
-            default:      return 0;
-        }
-    }
-
-    // === HELPERS ===
-
-    private boolean isSameDirection(double dir1, double dir2) {
-        return Math.abs(normalize(dir1) - normalize(dir2)) < ANGLE_PRECISION;
-    }
-
-    private double myGetHeading() {
-        double result = getHeading();
-        while (result < 0) result += 2 * Math.PI;
-        while (result >= 2 * Math.PI) result -= 2 * Math.PI;
-        return result;
-    }
-
-    private double normalize(double dir) {
-        double res = dir;
-        while (res < 0) res += 2 * Math.PI;
-        while (res >= 2 * Math.PI) res -= 2 * Math.PI;
-        return res;
-    }
-
-    // ===== DETECTION FUNCTIONS =====
-
-    private boolean isInFront(double objDir) {
-        double relativeAngle = normalize(objDir - myGetHeading());
-        return relativeAngle < Math.PI / 4 || relativeAngle > (2 * Math.PI - Math.PI / 4);
-    }
-
-    private boolean isBehind(double objDir) {
-        double relativeAngle = normalize(objDir - myGetHeading());
-        return relativeAngle > (3 * Math.PI / 4) && relativeAngle < (5 * Math.PI / 4);
-    }
-
-    private boolean obstacleCheck() {
-        return detectWall() || isBlockedByWreckObstacle() || isBlockedByTeamMate() || isBlockedByOpponent();
-    }
-
-    private boolean isBlockedByTeamMainBotOnly() {
-        return isBlockedByTeamMainBot() && !detectWall() && !isBlockedByWreckObstacle()
-                && !isBlockedBySecondaryBot() && !isBlockedByOpponent();
-    }
-
-    private boolean isBlockedBySecondaryBotOnly() {
-        return isBlockedBySecondaryBot() && !detectWall() && !isBlockedByWreckObstacle()
-                && !isBlockedByTeamMainBot() && !isBlockedByOpponent();
-    }
-
-    private boolean detectWall() {
-        return detectFront().getObjectType() == IFrontSensorResult.Types.WALL;
-    }
-
-    private boolean isBlockedByWreckObstacle() {
-        for (IRadarResult o : detectRadar()) {
-            if (o.getObjectType() == IRadarResult.Types.Wreck
-                    && isInFront(o.getObjectDirection())
-                    && o.getObjectDistance() < WRECK_DETECTION_DISTANCE) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private boolean isBlockedByTeamMainBot() {
-        for (IRadarResult o : detectRadar()) {
-            if (o.getObjectType() == IRadarResult.Types.TeamMainBot
-                    && isInFront(o.getObjectDirection())
-                    && !isBehind(o.getObjectDirection())
-                    && o.getObjectDistance() < TEAMMATE_DETECTION_DISTANCE) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private boolean isBlockedByTeamMate() {
-        return isBlockedByTeamMainBot() || isBlockedBySecondaryBot();
-    }
-
-    private boolean isBlockedBySecondaryBot() {
-        for (IRadarResult o : detectRadar()) {
-            if ((o.getObjectType() == IRadarResult.Types.TeamSecondaryBot
-                    || o.getObjectType() == IRadarResult.Types.OpponentSecondaryBot)
-                    && isInFront(o.getObjectDirection())
-                    && !isBehind(o.getObjectDirection())
-                    && o.getObjectDistance() < SECONDARY_BOT_DETECTION_DISTANCE) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private boolean isBlockedByOpponent() {
-        for (IRadarResult o : detectRadar()) {
-            if ((o.getObjectType() == IRadarResult.Types.OpponentMainBot
-                    || o.getObjectType() == IRadarResult.Types.OpponentSecondaryBot)
-                    && isInFront(o.getObjectDirection())
-                    && !isBehind(o.getObjectDirection())
-                    && o.getObjectDistance() < ENEMY_DETECTION_DISTANCE) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private void rememberWrecks() {
-        for (IRadarResult o : detectRadar()) {
-            if (o.getObjectType() != IRadarResult.Types.Wreck) continue;
-
-            // Convert radar polar -> absolute world coordinates
-            double wx = myX + o.getObjectDistance() * Math.cos(o.getObjectDirection());
-            double wy = myY + o.getObjectDistance() * Math.sin(o.getObjectDirection());
-
-            // Check if already known (with tolerance)
-            boolean alreadyKnown = false;
-            for (WreckInfo w : knownWrecks) {
-                if (Math.hypot(w.x - wx, w.y - wy) <= WRECK_SAME_POS_EPS) {
-                    alreadyKnown = true;
-                    break;
                 }
             }
 
-            if (!alreadyKnown) {
-                knownWrecks.add(new WreckInfo(wx, wy));
-//                sendLogMessage(robotName + " memorized wreck at (" + (int) wx + ", " + (int) wy + ")  total=" + knownWrecks.size());
+            if (target != null) {
+                fire(target.getObjectDirection());
+                broadcastEnemyPosition(target);
             }
         }
+
+        private boolean enemyCheck() {
+            for (IRadarResult o : detectRadar()) {
+                if ((o.getObjectType() == IRadarResult.Types.OpponentMainBot
+                        || o.getObjectType() == IRadarResult.Types.OpponentSecondaryBot)
+                        && o.getObjectDistance() <= ENEMY_RANGE
+                        && !isBlockedByWreckLine(o.getObjectDirection(), o.getObjectDistance())) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private boolean isBlockedByWreckLine(double enemyDir, double enemyDist) {
+            double botRadius = Parameters.teamAMainBotRadius;
+            for (IRadarResult wreck : detectRadar()) {
+                if (wreck.getObjectType() == IRadarResult.Types.Wreck && wreck.getObjectDistance() < enemyDist) {
+                    double angularWidth = Math.atan(botRadius / wreck.getObjectDistance());
+                    double angleDiff = Math.abs(normalize(wreck.getObjectDirection() - enemyDir));
+                    if (angleDiff > Math.PI) angleDiff = 2 * Math.PI - angleDiff;
+                    if (angleDiff <= angularWidth) return true;
+                }
+            }
+            return false;
+        }
+
+        // ============================================================
+        // COMMUNICATION
+        // ============================================================
+
+        private void broadcastEnemyPosition(IRadarResult enemy) {
+            double enemyAbsoluteX = myX + enemy.getObjectDistance() * Math.cos(enemy.getObjectDirection());
+            double enemyAbsoluteY = myY + enemy.getObjectDistance() * Math.sin(enemy.getObjectDirection());
+            broadcast("ENEMY_LOCATION|" + robotName + "|" + (int)myX + "|" + (int)myY
+                    + "|" + (int)enemyAbsoluteX + "|" + (int)enemyAbsoluteY);
+        }
+
+        private void readTeammateMessages() {
+            for (String msg : fetchAllMessages()) {
+                if (msg.startsWith("ENEMY_LOCATION|") || msg.startsWith("SCOUT_ENEMY_LOCATION")) {
+                    parseEnemyMessage(msg);
+                } else if (msg.startsWith("BORDER")) {
+                    parseBorderMessage(msg);
+                }
+            }
+        }
+
+        private void parseEnemyMessage(String msg) {
+            try {
+                String[] parts = msg.split("\\|");
+                if (parts.length == 6 && !robotName.equals(parts[1])) {
+                    double enemyX = Double.parseDouble(parts[4]);
+                    double enemyY = Double.parseDouble(parts[5]);
+                    stepsSinceEnemyUpdate = 0;
+                    applyFormationOffset(parts[1], enemyX, enemyY);
+                }
+            } catch (Exception ignored) {}
+        }
+
+        private void parseBorderMessage(String msg) {
+            try {
+                String[] parts = msg.split("\\|");
+                if (parts.length == 3) {
+                    int pos = Integer.parseInt(parts[2]);
+                    switch (parts[1]) {
+                        case "NORTH": northBound = pos; break;
+                        case "SOUTH": southBound = pos; break;
+                        case "WEST": westBound = pos; break;
+                        case "EAST": eastBound = pos; break;
+                    }
+                }
+            } catch (Exception ignored) {}
+        }
+
+        private void applyFormationOffset(String spotter, double targetX, double targetY) {
+            int relativeOffset = getRolePosition(robotName) - getRolePosition(spotter);
+            sharedEnemyX = targetX + (relativeOffset * FLANK_OFFSET_X);
+            sharedEnemyY = targetY;
+        }
+
+        private int getRolePosition(String name) {
+            switch (name) {
+                case "WARIO": return -1;
+                case "LUIGI": return 1;
+                default: return 0;
+            }
+        }
+
+        // ============================================================
+        // WRECK & BORDER HELPERS
+        // ============================================================
+
+        private void rememberWrecks() {
+            for (IRadarResult o : detectRadar()) {
+                if (o.getObjectType() != IRadarResult.Types.Wreck) continue;
+
+                double wx = myX + o.getObjectDistance() * Math.cos(o.getObjectDirection());
+                double wy = myY + o.getObjectDistance() * Math.sin(o.getObjectDirection());
+
+                boolean alreadyKnown = knownWrecks.stream()
+                        .anyMatch(w -> Math.hypot(w.x - wx, w.y - wy) <= WRECK_TOLERANCE);
+
+                if (!alreadyKnown) knownWrecks.add(new WreckInfo(wx, wy));
+            }
+        }
+
+        private boolean nearKnownBorder() {
+            double best = Double.POSITIVE_INFINITY;
+            if (northBound != -1) best = Math.min(best, Math.abs(northBound - myY));
+            if (southBound != -1) best = Math.min(best, Math.abs(myY - southBound));
+            if (eastBound != -1) best = Math.min(best, Math.abs(eastBound - myX));
+            if (westBound != -1) best = Math.min(best, Math.abs(myX - westBound));
+            return best <= BORDER_MARGIN;
+        }
+
+        private double angleTowardKnownCenter() {
+            double cx = (westBound != -1 && eastBound != -1) ? (westBound + eastBound) / 2.0 : DEFAULTX;
+            double cy = (southBound != -1 && northBound != -1) ? (southBound + northBound) / 2.0 : DEFAULTY;
+            return Math.atan2(cy - myY, cx - myX);
+        }
+
+        // ============================================================
+        // UTILITY METHODS
+        // ============================================================
+
+        private boolean isSameDirection(double dir1, double dir2) {
+            return Math.abs(normalize(dir1) - normalize(dir2)) < ANGLE_PRECISION;
+        }
+
+        private double myGetHeading() {
+            double result = getHeading();
+            while (result < 0) result += 2 * Math.PI;
+            while (result >= 2 * Math.PI) result -= 2 * Math.PI;
+            return result;
+        }
+
+        private double normalize(double dir) {
+            double res = dir;
+            while (res < 0) res += 2 * Math.PI;
+            while (res >= 2 * Math.PI) res -= 2 * Math.PI;
+            return res;
+        }
     }
-
-    private double minDistanceToKnownBorder() {
-        double best = Double.POSITIVE_INFINITY;
-
-        if (northBound != -1) best = Math.min(best, Math.abs(northBound - myY));
-        if (southBound != -1) best = Math.min(best, Math.abs(myY - southBound));
-        if (eastBound  != -1) best = Math.min(best, Math.abs(eastBound  - myX));
-        if (westBound  != -1) best = Math.min(best, Math.abs(myX - westBound));
-
-        return best;
-    }
-
-    private boolean nearKnownBorder() {
-        return minDistanceToKnownBorder() <= BORDER_MARGIN;
-    }
-
-    /**
-     * Point inward (toward the center of known bounds if we have them,
-     * otherwise fallback to DEFAULTX/DEFAULTY).
-     */
-    private double angleTowardKnownCenter() {
-        double cx;
-        if (westBound != -1 && eastBound != -1) cx = (westBound + eastBound) / 2.0;
-        else cx = DEFAULTX;
-
-        double cy;
-        if (southBound != -1 && northBound != -1) cy = (southBound + northBound) / 2.0;
-        else cy = DEFAULTY;
-
-        return Math.atan2(cy - myY, cx - myX);
-    }
-
-    /**
-     * Fast "just get off the wall" turn used when we hit a wall but don't trust borders yet.
-     */
-    private double directWallTurn(double heading) {
-        // Alternate to avoid bias
-        if (consecutiveBlocked % 2 == 0) return normalize(heading + Math.PI / 2);
-        return normalize(heading - Math.PI / 2);
-    }
-
-
-}
