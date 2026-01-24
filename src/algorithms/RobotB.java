@@ -66,6 +66,8 @@ public class RobotB extends Brain {
     private double eastBound = -1;
     private double southBound = -1;
 
+    private double DEFAULTX = 0;
+    private double DEFAULTY = 0;
     // --- AVOIDANCE MEMORY ---
     private State resumeState = State.MOVE;     // where to go back after avoiding
     private double resumeX = -1, resumeY = -1;  // goal to continue (for converging)
@@ -98,11 +100,11 @@ public class RobotB extends Brain {
 
         int whoAmI;
         if (seesNorth && !seesSouth) {
-            whoAmI = 3; // bottom -> LUIGI
+            whoAmI = 3; // Bottom , LUIGI
         } else if (seesSouth && !seesNorth) {
-            whoAmI = 1; // top -> WARIO
+            whoAmI = 1; // Top , WARIO
         } else {
-            whoAmI = 2; // middle -> MARIO
+            whoAmI = 2; // Middle , MARIO
         }
 
         if (whoAmI == 1) {
@@ -124,6 +126,8 @@ public class RobotB extends Brain {
             role = Role.LUIGI;
         }
 
+        DEFAULTX = Parameters.teamBMainBot2InitX - 300; // For B its - & for A its +
+        DEFAULTY = Parameters.teamBMainBot2InitY;
         sendLogMessage("=== I AM " + robotName + "! ===");
 
         state = State.STOPPED;
@@ -209,7 +213,7 @@ public class RobotB extends Brain {
 
             case ATTACKING:
                 if (enemyCheck()) shootEnemy();
-                else state = State.MOVE;
+                else meetAtPoint(DEFAULTX, DEFAULTY, 100); // go back to default position
                 break;
 
             case WAITING:
@@ -308,6 +312,11 @@ public class RobotB extends Brain {
         if (distance < precision) {
             sendLogMessage(robotName + " >>> Arrived near target!");
             // stay in converging logic but can fall back to MOVE if you want
+            if(x == DEFAULTX && y == DEFAULTY){
+                state = State.STOPPED;
+                noEnemySignalCooldown = STOPPED_TIME;
+                return;
+            }
             state = State.MOVE;
             return;
         }
