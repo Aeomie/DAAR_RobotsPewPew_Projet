@@ -267,12 +267,11 @@ public class RobotB extends Brain {
 
             case AVOID_FORWARD:
                 if (avoidForwardSteps > 0) {
-                    // ✅ STILL CHECK OBSTACLES even in avoidance
-                    if (!obstacleCheck()) {
-                        myMove();
+                    moveWithObstacleDetection(); // ✅ Use unified method
+                    if (consecutiveBlocked == 0) { // Only decrement if successful
                         avoidForwardSteps--;
                     } else {
-                        // still blocked: re-avoid (but keep resume goal)
+                        // Still blocked: re-avoid
                         avoidBackSteps = AVOID_BACK_STEPS;
                         state = State.AVOID_BACK;
                     }
