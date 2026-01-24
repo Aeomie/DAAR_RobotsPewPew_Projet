@@ -42,11 +42,7 @@ public class RobotSecondary extends Brain {
     private double eastBound = -1;
     private double southBound = -1;
 
-    private static final double TEAMMATE_DETECTION_DISTANCE = 10000;
-    private static final double ENEMY_DETECTION_DISTANCE = 200;
-    private static final double WRECK_DETECTION_DISTANCE = 100;
-    private static final double SECONDARY_BOT_DETECTION_DISTANCE = 100;
-
+    private double DETECTION_RANGE = Parameters.teamASecondaryBotFrontalDetectionRange;
     private int yieldBackSteps = 0;
     private static final int YIELD_BACK_STEPS_MAIN = 6;
     private static final int YIELD_BACK_STEPS_SECONDARY = 3;
@@ -707,7 +703,7 @@ public class RobotSecondary extends Brain {
                     || o.getObjectType() == IRadarResult.Types.OpponentSecondaryBot)
                     && isInFront(o.getObjectDirection())
                     && !isBehind(o.getObjectDirection())
-                    && o.getObjectDistance() < SECONDARY_BOT_DETECTION_DISTANCE) {
+                    && o.getObjectDistance() < DETECTION_RANGE) {
                 return true;
             }
         return false;
@@ -719,7 +715,7 @@ public class RobotSecondary extends Brain {
                     || o.getObjectType() == IRadarResult.Types.OpponentSecondaryBot)
                     && isInFront(o.getObjectDirection())
                     && !isBehind(o.getObjectDirection())
-                    && o.getObjectDistance() < ENEMY_DETECTION_DISTANCE) {
+                    && o.getObjectDistance() < DETECTION_RANGE) {
                 return true;
             }
         return false;
@@ -730,7 +726,7 @@ public class RobotSecondary extends Brain {
             if (o.getObjectType() == IRadarResult.Types.TeamMainBot
                     && isInFront(o.getObjectDirection())
                     && !isBehind(o.getObjectDirection())
-                    && o.getObjectDistance() < TEAMMATE_DETECTION_DISTANCE) {
+                    && o.getObjectDistance() < DETECTION_RANGE) {
                 return true;
             }
         return false;
@@ -757,7 +753,7 @@ public class RobotSecondary extends Brain {
         for (IRadarResult o : detectRadar())
             if (o.getObjectType() == IRadarResult.Types.Wreck
                     && isInFront(o.getObjectDirection())
-                    && o.getObjectDistance() < WRECK_DETECTION_DISTANCE) {
+                    && o.getObjectDistance() < DETECTION_RANGE) {
                 return true;
             }
         return false;

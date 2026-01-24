@@ -42,11 +42,8 @@ public class RobotSecondaryB extends Brain {
     private double eastBound = -1;
     private double southBound = -1;
 
-    private static final double TEAMMATE_DETECTION_DISTANCE = 10000;
-    private static final double ENEMY_DETECTION_DISTANCE = 200;
-    private static final double WRECK_DETECTION_DISTANCE = 100;
-    private static final double SECONDARY_BOT_DETECTION_DISTANCE = 100;
 
+    private static final double DETECTION_RANGE = Parameters.teamBSecondaryBotFrontalDetectionRange;
     private int yieldBackSteps = 0;
     private static final int YIELD_BACK_STEPS_MAIN = 6;
     private static final int YIELD_BACK_STEPS_SECONDARY = 3;
@@ -230,7 +227,7 @@ public class RobotSecondaryB extends Brain {
 
                     if (!wallLatchActive) {
                         latchWallStart();
-                        northBound = myY;
+                        southBound = myY;
                         broadcastBorders("SOUTH");
                     }
 
@@ -241,6 +238,10 @@ public class RobotSecondaryB extends Brain {
                 break;
 
             case TURNING_WEST:
+                if(isBlockedByWreckObstacle() || isBlockedByTeamMate() || isBlockedByOpponent()) {
+                    state = State.MOVE;
+                    break;
+                }
                 if (isSameDirection(myGetHeading(), Parameters.WEST)) {
                     state = State.CHECKING_WEST;
                 } else {
@@ -249,6 +250,10 @@ public class RobotSecondaryB extends Brain {
                 break;
 
             case CHECKING_WEST:
+                if(isBlockedByWreckObstacle() || isBlockedByTeamMate() || isBlockedByOpponent()) {
+                    state = State.MOVE;
+                    break;
+                }
                 if (detectWall()) {
                     westBound = myX;
                     broadcastBorders("WEST");
@@ -259,6 +264,10 @@ public class RobotSecondaryB extends Brain {
                 break;
 
             case TURNING_EAST:
+                if(isBlockedByWreckObstacle() || isBlockedByTeamMate() || isBlockedByOpponent()) {
+                    state = State.MOVE;
+                    break;
+                }
                 if (isSameDirection(myGetHeading(), Parameters.EAST)) {
                     state = State.CHECKING_EAST;
                 } else {
@@ -267,6 +276,10 @@ public class RobotSecondaryB extends Brain {
                 break;
 
             case CHECKING_EAST:
+                if(isBlockedByWreckObstacle() || isBlockedByTeamMate() || isBlockedByOpponent()) {
+                    state = State.MOVE;
+                    break;
+                }
                 if (detectWall()) {
                     eastBound = myX;
                     broadcastBorders("EAST");
@@ -699,7 +712,7 @@ public class RobotSecondaryB extends Brain {
                     || o.getObjectType() == IRadarResult.Types.OpponentSecondaryBot)
                     && isInFront(o.getObjectDirection())
                     && !isBehind(o.getObjectDirection())
-                    && o.getObjectDistance() < SECONDARY_BOT_DETECTION_DISTANCE) {
+                    && o.getObjectDistance() < DETECTION_RANGE) {
                 return true;
             }
         return false;
@@ -711,7 +724,7 @@ public class RobotSecondaryB extends Brain {
                     || o.getObjectType() == IRadarResult.Types.OpponentSecondaryBot)
                     && isInFront(o.getObjectDirection())
                     && !isBehind(o.getObjectDirection())
-                    && o.getObjectDistance() < ENEMY_DETECTION_DISTANCE) {
+                    && o.getObjectDistance() < DETECTION_RANGE) {
                 return true;
             }
         return false;
@@ -722,7 +735,7 @@ public class RobotSecondaryB extends Brain {
             if (o.getObjectType() == IRadarResult.Types.TeamMainBot
                     && isInFront(o.getObjectDirection())
                     && !isBehind(o.getObjectDirection())
-                    && o.getObjectDistance() < TEAMMATE_DETECTION_DISTANCE) {
+                    && o.getObjectDistance() < DETECTION_RANGE) {
                 return true;
             }
         return false;
@@ -749,7 +762,7 @@ public class RobotSecondaryB extends Brain {
         for (IRadarResult o : detectRadar())
             if (o.getObjectType() == IRadarResult.Types.Wreck
                     && isInFront(o.getObjectDirection())
-                    && o.getObjectDistance() < WRECK_DETECTION_DISTANCE) {
+                    && o.getObjectDistance() < DETECTION_RANGE) {
                 return true;
             }
         return false;
