@@ -20,17 +20,26 @@ public class Robot extends Brain {
     private State state = State.IDLE;
     private double myX, myY;
     private double targetAngle;
-    private boolean isMoving;
+
+    // --- ODOMETRY MOVE FLAG ---
+    // +1 = moved forward this step, -1 = moved backward this step, 0 = no move
+    private int moveSign = 0;
+
     private int backupSteps = 0;
     private int consecutiveBlocked = 0;
     private int waitCounter = 0;
+
     private static final double ANGLE_PRECISION = 0.1;
     private static final int MAX_BACKUP_STEPS = 3;
     private static final int MAX_WAIT_TIME = 5;
 
+    // ✅ SMALL TURN LIKE SECONDARY
+    private static final double TURN_INCREMENT = Math.PI / 6; // 30°
+
     // --- TACTICAL POSITIONING ---
-    private static final double FLANK_OFFSET_X = 150;  // Horizontal flanking distance
-    private static final double FLANK_OFFSET_Y = 100;  // Vertical positioning offset
+    private static final double FLANK_OFFSET_X = 150;
+    private static final double FLANK_OFFSET_Y = 100;
+
     // --- SHARED ENEMY TRACKING ---
     private double sharedEnemyX = -1;
     private double sharedEnemyY = -1;
@@ -42,7 +51,6 @@ public class Robot extends Brain {
     private static final int WRECK_DETECTION_DISTANCE = 100;
     private static final int TEAMMATE_DETECTION_DISTANCE = 120;
     private static final int SECONDARY_BOT_DETECTION_DISTANCE = 80;
-
 
     // STOPPED TIME
     private static final int STOPPED_TIME = 2000;
@@ -56,62 +64,41 @@ public class Robot extends Brain {
 
     @Override
     public void activate() {
-        // Determine role based on initial position
-        // Bot 1 (left side) = WARIO
-        // Bot 2 (center/right) = MARIO or LUIGI based on radar detection
-
-        int botsAbove = 0;  // Teammates to the north
-        int botsBelow = 0;  // Teammates to the south
+        boolean seesNorth = false;
+        boolean seesSouth = false;
 
         for (IRadarResult o : detectRadar()) {
             if (o.getObjectType() == IRadarResult.Types.TeamMainBot) {
-                double relativeAngle = normalize(o.getObjectDirection() - myGetHeading());
-
-                // Check if teammate is above (north direction range: π/4 to 3π/4)
-                if (relativeAngle > Math.PI / 4 && relativeAngle < 3 * Math.PI / 4) {
-                    botsAbove++;
-                }
-                // Check if teammate is below (south direction range: 5π/4 to 7π/4)
-                else if (relativeAngle > 5 * Math.PI / 4 && relativeAngle < 7 * Math.PI / 4) {
-                    botsBelow++;
-                }
+                if (isSameDirection(o.getObjectDirection(), Parameters.NORTH)) seesNorth = true;
+                if (isSameDirection(o.getObjectDirection(), Parameters.SOUTH)) seesSouth = true;
             }
         }
-        if(botsBelow >= botsAbove) {
-            if(botsBelow == botsAbove) {
-                // Mid bot
-                role = Role.MARIO;
-                robotName = "MARIO";
-                myX = Parameters.teamAMainBot2InitX;
-                myY = Parameters.teamAMainBot2InitY;
 
-            }else{
-                // Top Bot
-                role = Role.WARIO;
-                robotName = "WARIO";
-                myX = Parameters.teamAMainBot1InitX;
-                myY = Parameters.teamAMainBot1InitY;
-
-            }
-        }else{
-            // Bottom Bot
-            role = Role.LUIGI;
-            robotName = "LUIGI";
-            myX = Parameters.teamAMainBot3InitX;
-            myY = Parameters.teamAMainBot3InitY;
-
+        int whoAmI;
+        if (seesNorth && !seesSouth) {
+            whoAmI = 3; // bottom -> LUIGI
+        } else if (seesSouth && !seesNorth) {
+            whoAmI = 1; // top -> WARIO
+        } else {
+            whoAmI = 2; // middle -> MARIO
         }
+
+        if (whoAmI == 1) { myX = Parameters.teamAMainBot1InitX; myY = Parameters.teamAMainBot1InitY; robotName = "WARIO"; }
+        if (whoAmI == 2) { myX = Parameters.teamAMainBot2InitX; myY = Parameters.teamAMainBot2InitY; robotName = "MARIO"; }
+        if (whoAmI == 3) { myX = Parameters.teamAMainBot3InitX; myY = Parameters.teamAMainBot3InitY; robotName = "LUIGI"; }
         sendLogMessage("=== I AM " + robotName + "! ===");
-//        state = State.IDLE;
         state = State.STOPPED;
-        isMoving = false;
+
+        moveSign = 0;
         targetAngle = myGetHeading();
         noEnemySignalCooldown = STOPPED_TIME;
     }
+
     @Override
     public void step() {
         updateOdometry();
         readTeammateMessages();
+
         if (enemyCheck() && state != State.ATTACKING) {
             state = State.ATTACKING;
         }
@@ -120,29 +107,16 @@ public class Robot extends Brain {
         if (stepsSinceEnemyUpdate > ENEMY_INFO_EXPIRY) {
             sharedEnemyX = -1;
             sharedEnemyY = -1;
-            if (state == State.CONVERGING) {
-                state = State.MOVE;
-            }
+            if (state == State.CONVERGING) state = State.MOVE;
         }
+
         noEnemySignalCooldown = Math.max(0, noEnemySignalCooldown - 1);
-        switch(state) {
+
+        switch (state) {
             case STOPPED:
-                // If we received enemy info from a teammate -> react immediately
-                if (sharedEnemyX != -1) {
-                    state = State.CONVERGING;
-                    break;
-                }
-
-                // Passive defense
-                if (enemyCheck()) {
-                    state = State.ATTACKING;
-                    break;
-                }
-
-                // Timeout -> resume exploration
-                if (noEnemySignalCooldown == 0) {
-                    state = State.MOVE;
-                }
+                if (sharedEnemyX != -1) { state = State.CONVERGING; break; }
+                if (enemyCheck()) { state = State.ATTACKING; break; }
+                if (noEnemySignalCooldown == 0) state = State.MOVE;
                 break;
 
             case IDLE:
@@ -157,10 +131,7 @@ public class Robot extends Brain {
                     break;
                 }
 
-                if (enemyCheck()) {
-                    state = State.ATTACKING;
-                    break;
-                }
+                if (enemyCheck()) { state = State.ATTACKING; break; }
 
                 if (!obstacleCheck()) {
                     myMove();
@@ -179,23 +150,15 @@ public class Robot extends Brain {
                 break;
 
             case CONVERGING:
-                if (sharedEnemyX != -1) {
-                    meetAtPoint(sharedEnemyX, sharedEnemyY, 100);
-                } else {
-                    state = State.MOVE;
-                }
+                if (sharedEnemyX != -1) meetAtPoint(sharedEnemyX, sharedEnemyY, 100);
+                else state = State.MOVE;
 
-                if (enemyCheck()) {
-                    state = State.ATTACKING;
-                }
+                if (enemyCheck()) state = State.ATTACKING;
                 break;
 
             case ATTACKING:
-                if (enemyCheck()) {
-                    shootEnemy();
-                } else {
-                    state = State.MOVE;
-                }
+                if (enemyCheck()) shootEnemy();
+                else state = State.MOVE;
                 break;
 
             case WAITING:
@@ -212,10 +175,11 @@ public class Robot extends Brain {
 
             case BACKING_UP:
                 if (backupSteps < MAX_BACKUP_STEPS) {
-                    moveBack();
+                    myMoveBack();
                     backupSteps++;
                 } else {
                     state = State.TURNING;
+                    // ✅ now sets a SMALL target (30° step), not 90°
                     targetAngle = calculateAvoidanceAngle();
                 }
                 break;
@@ -225,7 +189,7 @@ public class Robot extends Brain {
                     state = State.MOVE;
                 } else {
                     Parameters.Direction turnDir = getTurnDirection(myGetHeading(), targetAngle);
-                    stepTurn(turnDir);
+                    stepTurn(turnDir); // this is “small per tick” already; we just keep targets small too
                 }
                 break;
         }
@@ -242,38 +206,29 @@ public class Robot extends Brain {
                     o.getObjectType() == IRadarResult.Types.OpponentSecondaryBot) &&
                     o.getObjectDistance() <= ENEMY_DETECTION_DISTANCE) {
 
-                if (isBlockedByWreck(o.getObjectDirection(), o.getObjectDistance())) {
-                    continue;
-                }
+                if (isBlockedByWreck(o.getObjectDirection(), o.getObjectDistance())) continue;
 
-                if (o.getObjectType() == IRadarResult.Types.OpponentMainBot) {
-                    enemiesShooters.add(o);
-                } else {
-                    enemiesScouts.add(o);
-                }
+                if (o.getObjectType() == IRadarResult.Types.OpponentMainBot) enemiesShooters.add(o);
+                else enemiesScouts.add(o);
             }
         }
 
         if (!enemiesShooters.isEmpty()) {
             IRadarResult target = enemiesShooters.get(0);
-            for (IRadarResult enemy : enemiesShooters) {
-                if (enemy.getObjectDistance() < target.getObjectDistance()) {
-                    target = enemy;
-                }
-            }
+            for (IRadarResult e : enemiesShooters)
+                if (e.getObjectDistance() < target.getObjectDistance()) target = e;
+
             fire(target.getObjectDirection());
-            sendLogMessage(robotName + " firing at enemy main bot at " + (int)target.getObjectDistance() + "mm");
+            sendLogMessage(robotName + " firing at enemy main bot at " + (int) target.getObjectDistance() + "mm");
             broadcastEnemyPosition(target);
 
         } else if (!enemiesScouts.isEmpty()) {
             IRadarResult target = enemiesScouts.get(0);
-            for (IRadarResult enemy : enemiesScouts) {
-                if (enemy.getObjectDistance() < target.getObjectDistance()) {
-                    target = enemy;
-                }
-            }
+            for (IRadarResult e : enemiesScouts)
+                if (e.getObjectDistance() < target.getObjectDistance()) target = e;
+
             fire(target.getObjectDirection());
-            sendLogMessage(robotName + " firing at enemy secondary bot at " + (int)target.getObjectDistance() + "mm");
+            sendLogMessage(robotName + " firing at enemy secondary bot at " + (int) target.getObjectDistance() + "mm");
             broadcastEnemyPosition(target);
         }
     }
@@ -284,10 +239,7 @@ public class Robot extends Brain {
                     o.getObjectType() == IRadarResult.Types.OpponentSecondaryBot) &&
                     o.getObjectDistance() <= ENEMY_DETECTION_DISTANCE) {
 
-                if (isBlockedByWreck(o.getObjectDirection(), o.getObjectDistance())) {
-                    continue;
-                }
-
+                if (isBlockedByWreck(o.getObjectDirection(), o.getObjectDistance())) continue;
                 return true;
             }
         }
@@ -305,9 +257,7 @@ public class Robot extends Brain {
                 double angleDiff = Math.abs(normalize(wreck.getObjectDirection() - enemyDirection));
                 if (angleDiff > Math.PI) angleDiff = 2 * Math.PI - angleDiff;
 
-                if (angleDiff <= angularWidth) {
-                    return true;
-                }
+                if (angleDiff <= angularWidth) return true;
             }
         }
         return false;
@@ -319,13 +269,13 @@ public class Robot extends Brain {
         double enemyAbsoluteX = myX + enemy.getObjectDistance() * Math.cos(enemy.getObjectDirection());
         double enemyAbsoluteY = myY + enemy.getObjectDistance() * Math.sin(enemy.getObjectDirection());
 
-        // Broadcast both spotter position AND enemy position for smart convergence
         String message = "ENEMY_LOCATION|" + robotName + "|" +
-                (int)myX + "|" + (int)myY + "|" +
-                (int)enemyAbsoluteX + "|" + (int)enemyAbsoluteY;
+                (int) myX + "|" + (int) myY + "|" +
+                (int) enemyAbsoluteX + "|" + (int) enemyAbsoluteY;
         broadcast(message);
-        sendLogMessage(robotName + " broadcasting: I'm at (" + (int)myX + "," + (int)myY +
-                "), enemy at (" + (int)enemyAbsoluteX + "," + (int)enemyAbsoluteY + ")");
+
+        sendLogMessage(robotName + " broadcasting: I'm at (" + (int) myX + "," + (int) myY +
+                "), enemy at (" + (int) enemyAbsoluteX + "," + (int) enemyAbsoluteY + ")");
     }
 
     private void readTeammateMessages() {
@@ -337,89 +287,85 @@ public class Robot extends Brain {
                     String[] parts = msg.split("\\|");
                     if (parts.length == 6) {
                         String spotter = parts[1];
+                        if (robotName.equals(spotter)) continue;
 
-                        // Ignore our own messages
-                        if (robotName.equals(spotter)) {
-                            continue;
-                        }
-
-                        double spotterX = Double.parseDouble(parts[2]);
-                        double spotterY = Double.parseDouble(parts[3]);
                         double enemyX = Double.parseDouble(parts[4]);
                         double enemyY = Double.parseDouble(parts[5]);
                         stepsSinceEnemyUpdate = 0;
 
-
-                        // Form up around the spotter's position
                         applyFormationOffset(spotter, enemyX, enemyY);
 
                         sendLogMessage(robotName + " received from " + spotter +
-                                " - Converging to (" + (int)sharedEnemyX + "," + (int)sharedEnemyY + ")");
+                                " - Converging to (" + (int) sharedEnemyX + "," + (int) sharedEnemyY + ")");
                     }
                 } catch (Exception e) {
-                    // Invalid message, ignore
+                    // ignore
                 }
             }
-            if (msg.startsWith("BORDER")){
-                try{
-                    String[] parts = msg.split("\\|");
-                    if (parts.length == 3) {
-                        String borderType = parts[1];
-                        String position = parts[2];
-                        Integer pos = Integer.parseInt(position);
-                        sendLogMessage(robotName + " received border info: " + borderType + " at " + pos);
-                        switch (borderType) {
-                            case "NORTH":
-                                northBound = pos;
-                                break;
-                            case "SOUTH":
-                                southBound = pos;
-                                break;
-                            case "WEST":
-                                westBound = pos;
-                                break;
-                            case "EAST":
-                                eastBound = pos;
-                                break;
-                        }
-                    }
-                }catch (Exception e) {
-                    // Invalid message, ignore
-                }
-            }
-            if(msg.startsWith("SCOUT_ENEMY_LOCATION")) {
+
+            if (msg.startsWith("ENEMY_LOCATION|")) {
                 try {
                     String[] parts = msg.split("\\|");
                     if (parts.length == 6) {
                         String spotter = parts[1];
+                        if (robotName.equals(spotter)) continue;
 
+                        double enemyX = Double.parseDouble(parts[4]);
+                        double enemyY = Double.parseDouble(parts[5]);
+                        stepsSinceEnemyUpdate = 0;
 
-                        double spotterX = Double.parseDouble(parts[2]);
-                        double spotterY = Double.parseDouble(parts[3]);
+                        applyFormationOffset(spotter, enemyX, enemyY);
+
+                        sendLogMessage(robotName + " received from " + spotter +
+                                " - Converging to (" + (int) sharedEnemyX + "," + (int) sharedEnemyY + ")");
+                    }
+                } catch (Exception e) {
+                    // ignore
+                }
+            }
+
+            if (msg.startsWith("BORDER")) {
+                try {
+                    String[] parts = msg.split("\\|");
+                    if (parts.length == 3) {
+                        String borderType = parts[1];
+                        int pos = Integer.parseInt(parts[2]);
+                        switch (borderType) {
+                            case "NORTH": northBound = pos; break;
+                            case "SOUTH": southBound = pos; break;
+                            case "WEST":  westBound = pos;  break;
+                            case "EAST":  eastBound = pos;  break;
+                        }
+                    }
+                } catch (Exception e) {
+                    // ignore
+                }
+            }
+
+            if (msg.startsWith("SCOUT_ENEMY_LOCATION")) {
+                try {
+                    String[] parts = msg.split("\\|");
+                    if (parts.length == 6) {
+                        String spotter = parts[1];
                         double enemyX = Double.parseDouble(parts[4]);
                         double enemyY = Double.parseDouble(parts[5]);
                         stepsSinceEnemyUpdate = 0;
 
                         applyFormationOffset(spotter, enemyX, enemyY);
                         sendLogMessage(robotName + " received from " + spotter +
-                                " - Converging to (" + (int)sharedEnemyX + "," + (int)sharedEnemyY + ")");
+                                " - Converging to (" + (int) sharedEnemyX + "," + (int) sharedEnemyY + ")");
                     }
-                }catch (Exception e) {
-                    // Invalid message, ignore
+                } catch (Exception e) {
+                    // ignore
                 }
             }
-
         }
     }
 
     private void applyFormationOffset(String spotter, double targetX, double targetY) {
-        // Form up around the spotter maintaining formation order
-        // Calculate relative position: WARIO=-1, MARIO=0, LUIGI=1
-
         int spotterPosition = getRolePosition(spotter);
         int myPosition = getRolePosition(robotName);
 
-        // Calculate offset: difference in positions * FLANK_OFFSET_X
         int relativeOffset = (myPosition - spotterPosition);
 
         sharedEnemyX = targetX + (relativeOffset * FLANK_OFFSET_X);
@@ -429,19 +375,13 @@ public class Robot extends Brain {
     }
 
     private int getRolePosition(String name) {
-        // Return numeric position: WARIO=-1, MARIO=0, LUIGI=1
         switch (name) {
-            case "WARIO":
-                return -1;
-            case "MARIO":
-                return 0;
-            case "LUIGI":
-                return 1;
-            default:
-                return 0;
+            case "WARIO": return -1;
+            case "MARIO": return 0;
+            case "LUIGI": return 1;
+            default:      return 0;
         }
     }
-
 
     // === NAVIGATION METHODS === //
 
@@ -457,15 +397,14 @@ public class Robot extends Brain {
         double angleToTarget = Math.atan2(y - myY, x - myX);
 
         if (!isSameDirection(myGetHeading(), angleToTarget)) {
-            double diff = normalize(angleToTarget - myGetHeading());
-            Parameters.Direction dir = (diff < Math.PI) ? Parameters.Direction.RIGHT : Parameters.Direction.LEFT;
+            Parameters.Direction dir = getTurnDirection(myGetHeading(), angleToTarget);
             stepTurn(dir);
             return;
         }
 
         if (!obstacleCheck()) {
             myMove();
-            sendLogMessage(robotName + " >>> Converging on enemy. Distance: " + (int)distance + "mm");
+            sendLogMessage(robotName + " >>> Converging on enemy. Distance: " + (int) distance + "mm");
         } else {
             state = State.BACKING_UP;
             backupSteps = 0;
@@ -473,19 +412,13 @@ public class Robot extends Brain {
     }
 
     private void handleTeammateEncounter() {
-        // Priority based on character roles
-        // MARIO (center) has highest priority, WARIO and LUIGI yield
         if (role == Role.MARIO) {
-            // Mario waits briefly
             state = State.WAITING;
             waitCounter = 0;
-            sendLogMessage("MARIO: Waiting for teammate to pass");
         } else {
-            // Wario and Luigi go around immediately
             state = State.BACKING_UP;
             backupSteps = 0;
             consecutiveBlocked++;
-            sendLogMessage(robotName + ": Going around teammate");
         }
     }
 
@@ -495,46 +428,32 @@ public class Robot extends Brain {
         consecutiveBlocked++;
     }
 
+    // ✅ SMALL-TURN AVOIDANCE (NO 90°)
     private double calculateAvoidanceAngle() {
-        double currentHeading = myGetHeading();
-        boolean leftClear = true;
-        boolean rightClear = true;
-        int leftObstacles = 0;
-        int rightObstacles = 0;
+        double heading = myGetHeading();
+        int leftObs = 0, rightObs = 0;
 
         for (IRadarResult o : detectRadar()) {
-            if (isBehind(o.getObjectDirection())) {
-                continue;
-            }
-
+            if (isBehind(o.getObjectDirection())) continue;
             if (o.getObjectDistance() <= 250) {
-                double objDirection = o.getObjectDirection();
-                double relativeAngle = normalize(objDirection - currentHeading);
-
-                if (relativeAngle > 0 && relativeAngle < Math.PI) {
-                    rightClear = false;
-                    rightObstacles++;
-                } else {
-                    leftClear = false;
-                    leftObstacles++;
-                }
+                double rel = normalize(o.getObjectDirection() - heading);
+                if (rel > 0 && rel < Math.PI) rightObs++;
+                else leftObs++;
             }
         }
 
-        double turnAmount;
-        if (leftClear && !rightClear) {
-            turnAmount = Parameters.LEFTTURNFULLANGLE;
-        } else if (rightClear && !leftClear) {
-            turnAmount = Parameters.RIGHTTURNFULLANGLE;
-        } else if (leftObstacles < rightObstacles) {
-            turnAmount = Parameters.LEFTTURNFULLANGLE;
-        } else if (consecutiveBlocked > 3) {
-            turnAmount = Math.PI;
-        } else {
-            turnAmount = Parameters.RIGHTTURNFULLANGLE;
-        }
+        // Mostly pick the “less crowded” side, but ALWAYS only 30° at a time
+        double step = TURN_INCREMENT;
 
-        return normalize(currentHeading + turnAmount);
+        // alternate sometimes to avoid spiraling forever
+        if (consecutiveBlocked % 8 == 0) step = -TURN_INCREMENT;
+
+        if (leftObs < rightObs) return normalize(heading - TURN_INCREMENT);
+        if (rightObs < leftObs) return normalize(heading + TURN_INCREMENT);
+
+        // equal -> use alternating step
+        if (step > 0) return normalize(heading + TURN_INCREMENT);
+        else return normalize(heading - TURN_INCREMENT);
     }
 
     private Parameters.Direction getTurnDirection(double current, double target) {
@@ -542,25 +461,38 @@ public class Robot extends Brain {
         return (diff <= Math.PI) ? Parameters.Direction.RIGHT : Parameters.Direction.LEFT;
     }
 
+    // === ODOMETRY + MOVE WRAPPERS ===
+
     private void updateOdometry() {
         boolean blockedByWall = detectWall();
         boolean blockedByWreck = isBlockedByWreckObstacle();
         boolean blockedByTeamMate = isBlockedByTeamMate();
         boolean blockedByOpponent = isBlockedByOpponent();
 
-        if (isMoving) {
-            if (!blockedByWall && !blockedByWreck && !blockedByTeamMate && !blockedByOpponent) {
-                myX += Parameters.teamAMainBotSpeed * Math.cos(myGetHeading());
-                myY += Parameters.teamAMainBotSpeed * Math.sin(myGetHeading());
+        if (moveSign != 0) {
+            boolean blockForward = (moveSign > 0) && (blockedByWall || blockedByWreck || blockedByTeamMate || blockedByOpponent);
+
+            if (!blockForward) {
+                double step = Parameters.teamAMainBotSpeed * moveSign;
+                myX += step * Math.cos(myGetHeading());
+                myY += step * Math.sin(myGetHeading());
             }
-            isMoving = false;
+
+            moveSign = 0;
         }
     }
 
     private void myMove() {
-        isMoving = true;
+        moveSign = +1;
         move();
     }
+
+    private void myMoveBack() {
+        moveSign = -1;
+        moveBack();
+    }
+
+    // === HELPERS ===
 
     private boolean isSameDirection(double dir1, double dir2) {
         return Math.abs(normalize(dir1) - normalize(dir2)) < ANGLE_PRECISION;
