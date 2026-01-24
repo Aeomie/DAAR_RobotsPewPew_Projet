@@ -103,21 +103,11 @@ public class RobotSecondary extends Brain {
         Alpha is the one on bottom - explores north (top)
         Beta is the one on top - explores south (bottom)
          */
-        int botsAbove = 0;
-        int botsBelow = 0;
+        boolean seesNorth = false;
 
-        for (IRadarResult o : detectRadar()){
-            if(o.getObjectType() == IRadarResult.Types.TeamSecondaryBot){
-                double relativeAngle = normalize(o.getObjectDirection() - myGetHeading());
-
-                // Check if teammate is above (north direction range: π/4 to 3π/4)
-                if (relativeAngle > Math.PI / 4 && relativeAngle < 3 * Math.PI / 4) {
-                    botsAbove++;
-                }
-                // Check if teammate is below (south direction range: 5π/4 to 7π/4)
-                else if (relativeAngle > 5 * Math.PI / 4 && relativeAngle < 7 * Math.PI / 4) {
-                    botsBelow++;
-                }
+        for (IRadarResult o : detectRadar()) {
+            if (o.getObjectType() == IRadarResult.Types.TeamSecondaryBot) {
+                if (isSameDirection(o.getObjectDirection(), Parameters.NORTH)) seesNorth = true;
             }
         }
 
@@ -127,7 +117,7 @@ public class RobotSecondary extends Brain {
 
         retreatDefaultX = (Parameters.teamASecondaryBot1InitX + Parameters.teamASecondaryBot2InitX) / 2;
         retreatDefaultY = (Parameters.teamASecondaryBot1InitY + Parameters.teamASecondaryBot2InitY) / 2;
-        if (botsAbove == 0 && botsBelow == 1) {
+        if (seesNorth) {
             // Bottom position
             role = Role.EXPLORER_ALPHA;
             robotName = "Explorer Alpha";
@@ -230,8 +220,9 @@ public class RobotSecondary extends Brain {
 
                     if (!wallLatchActive) {
                         latchWallStart();
-                        northBound = myY;
+                        southBound = myY;
                         broadcastBorders("SOUTH");
+
                     }
 
                     myMove();
@@ -241,6 +232,11 @@ public class RobotSecondary extends Brain {
                 break;
 
             case TURNING_WEST:
+                if(isBlockedByWreckObstacle() || isBlockedByTeamMate() || isBlockedByOpponent()) {
+                    state = State.MOVE;
+                    break;
+                }
+
                 if (isSameDirection(myGetHeading(), Parameters.WEST)) {
                     state = State.CHECKING_WEST;
                 } else {
@@ -249,6 +245,10 @@ public class RobotSecondary extends Brain {
                 break;
 
             case CHECKING_WEST:
+                if(isBlockedByWreckObstacle() || isBlockedByTeamMate() || isBlockedByOpponent()) {
+                    state = State.MOVE;
+                    break;
+                }
                 if (detectWall()) {
                     westBound = myX;
                     broadcastBorders("WEST");
@@ -259,6 +259,10 @@ public class RobotSecondary extends Brain {
                 break;
 
             case TURNING_EAST:
+                if(isBlockedByWreckObstacle() || isBlockedByTeamMate() || isBlockedByOpponent()) {
+                    state = State.MOVE;
+                    break;
+                }
                 if (isSameDirection(myGetHeading(), Parameters.EAST)) {
                     state = State.CHECKING_EAST;
                 } else {
@@ -267,6 +271,10 @@ public class RobotSecondary extends Brain {
                 break;
 
             case CHECKING_EAST:
+                if(isBlockedByWreckObstacle() || isBlockedByTeamMate() || isBlockedByOpponent()) {
+                    state = State.MOVE;
+                    break;
+                }
                 if (detectWall()) {
                     eastBound = myX;
                     broadcastBorders("EAST");
