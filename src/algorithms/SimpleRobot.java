@@ -151,18 +151,18 @@ public class SimpleRobot extends Brain {
         tick++;
         updateOdometry();
         readTeammateMessages();
-//        dbg("state=" + state
-//                + " e_Lock=" + enemy_Lock
-//                + " t_Lock=" + target_Lock
-//                + " ttl=" + target_wait_time
-//                + " target=(" + (int)currentTargetX + "," + (int)currentTargetY + ")");
+        dbg("state=" + state
+                + " e_Lock=" + enemy_Lock
+                + " t_Lock=" + nav_Lock
+                + " ttl=" + enemy_wait_time
+                + " target=(" + (int)currentTargetX + "," + (int)currentTargetY + ")");
 
         test_time = Math.max(0, test_time - 1);
         stepsSinceEnemyUpdate++;
         if (stepsSinceEnemyUpdate > TARGET_RESET_COOLDOWN) {
             abandonCurrentTarget();
         }
-        if (escapeBackSteps > 0) {
+        if (escapeBackSteps > 0 && enemy_wait_time < 0) {
             myMoveBack();
             escapeBackSteps--;
             return;
@@ -176,6 +176,7 @@ public class SimpleRobot extends Brain {
                 currentTargetY = -1;
                 enemy_wait_time = -1;
             }
+            return;
         }
         if (enemy_Lock) {
             dbg("enemy_Lock=true -> trying updateTargetFromRadarIfVisible()");
@@ -398,10 +399,14 @@ public class SimpleRobot extends Brain {
 
     private void readTeammateMessages() {
         ArrayList<String> messages = fetchAllMessages();
-
+        boolean busy = enemy_Lock || (currentTargetX != -1 && currentTargetY != -1) || nav_Lock;
         for (String msg : messages) {
             if (msg.startsWith("ENEMY_LOCATION|")) {
                 try {
+                    if (busy){
+                        sendLogMessage("" + robotName + " BUSY, ignoring ENEMY message");
+                        continue;
+                    }
                     String[] parts = msg.split("\\|");
                     if (parts.length == 6) {
                         String spotter = parts[1];
@@ -420,6 +425,7 @@ public class SimpleRobot extends Brain {
 
             if (msg.startsWith("BORDER")) {
                 try {
+
                     String[] parts = msg.split("\\|");
                     if (parts.length == 3) {
                         String borderType = parts[1];
@@ -436,6 +442,10 @@ public class SimpleRobot extends Brain {
 
             if (msg.startsWith("SCOUT_ENEMY_LOCATION")) {
                 try {
+                    if (busy){
+                        sendLogMessage("" + robotName + " BUSY, ignoring ENEMY message");
+                        continue;
+                    }
                     String[] parts = msg.split("\\|");
                     if (parts.length == 6) {
                         String spotter = parts[1];
