@@ -69,6 +69,8 @@ public class RobotSecondaryB extends Brain {
     private static final double ENEMY_BROADCAST_MIN_MOVE = 120;
     private static final double ENEMY_BROADCAST_MAX_DIST = 700;
 
+    // ===== BORDER MARGIN FOR AVOIDANCE =====
+    private static final double BORDER_MARGIN = 150;
 
     @Override
     public void activate() {
@@ -254,7 +256,10 @@ public class RobotSecondaryB extends Brain {
     private void simpleAvoid(State returnState) {
 
         // anti-spam guard: only UTURN if we really failed at least once
-        if (detectWall() && consecutiveBlocks >= 1) {
+        IFrontSensorResult front = detectFront();
+        if (front.getObjectType() == IFrontSensorResult.Types.WALL
+                && consecutiveBlocks >= 1
+                && shouldUTurnOnWall(front)) {
             enterUTurnMode(returnState);
             return;
         }
@@ -435,6 +440,10 @@ public class RobotSecondaryB extends Brain {
                 if (parts.length != 3) continue;
                 String borderType = parts[1];
                 int pos = Integer.parseInt(parts[2]);
+                sendLogMessage(robotName + "WEST : " + westBound+
+                        "EAST : " + eastBound+
+                        "NORTH : " + northBound+
+                        "SOUTH : " + southBound);
 
                 switch (borderType) {
                     case "NORTH": northBound = pos; break;
@@ -499,25 +508,41 @@ public class RobotSecondaryB extends Brain {
     }
 
     private boolean wallBlocksNow() {
-        if (!detectWall()) return false;
+        IFrontSensorResult front = detectFront();
+        if (front.getObjectType() != IFrontSensorResult.Types.WALL) return false;
 
-        if (northBound < 0 && southBound < 0 && westBound < 0 && eastBound < 0) return true;
+        // No known borders => behave like before (treat wall as blocking)
+        if (!knowsAnyBorder()) return true;
 
-        double h = myGetHeading();
+        // Borders known => only block if the NEXT step would violate margin
+        return wouldCrossKnownBorderIfMoveForward(BORDER_MARGIN);
+    }
 
-        if (isSameDirection(h, Parameters.NORTH) && northBound >= 0) {
-            return myY <= northBound + WALL_BORDER_MARGIN;
-        }
-        if (isSameDirection(h, Parameters.SOUTH) && southBound >= 0) {
-            return myY >= southBound - WALL_BORDER_MARGIN;
-        }
-        if (isSameDirection(h, Parameters.WEST) && westBound >= 0) {
-            return myX <= westBound + WALL_BORDER_MARGIN;
-        }
-        if (isSameDirection(h, Parameters.EAST) && eastBound >= 0) {
-            return myX >= eastBound - WALL_BORDER_MARGIN;
+    private boolean wouldCrossKnownBorderIfMoveForward(double margin) {
+        double step = Parameters.teamBSecondaryBotSpeed;
+        double nx = myX + step * Math.cos(myGetHeading());
+        double ny = myY + step * Math.sin(myGetHeading());
+
+        // Only check borders we actually know (>= 0)
+        if (northBound >= 0 && ny >= northBound - margin) return true;
+        if (southBound >= 0 && ny <= southBound + margin) return true;
+        if (westBound  >= 0 && nx <= westBound  + margin) return true;
+        if (eastBound  >= 0 && nx >= eastBound  - margin) return true;
+
+        return false;
+    }
+
+    private boolean knowsAnyBorder() {
+        return northBound >= 0 || southBound >= 0 || westBound >= 0 || eastBound >= 0;
+    }
+
+    private boolean shouldUTurnOnWall(IFrontSensorResult front) {
+        if (knowsAnyBorder()) {
+            // Only UTURN if next step would violate known border margin
+            return wouldCrossKnownBorderIfMoveForward(BORDER_MARGIN);
         }
 
+        // Otherwise (no border known): original behavior
         return true;
     }
 }
