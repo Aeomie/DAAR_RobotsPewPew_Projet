@@ -71,7 +71,7 @@ public class SimpleRobot extends Brain {
     private static final double TARGET_PRECISION = 50;
     private boolean nav_Lock = false; // to differentiate between meetAtPoint to just meet or to enemy location
     private boolean enemy_Lock = false;
-    private static final int WAIT_ENEMY_TIME = 150;
+    private static final int WAIT_ENEMY_TIME = 80;
     private int enemy_wait_time = -1;
 
 
@@ -151,11 +151,11 @@ public class SimpleRobot extends Brain {
         tick++;
         updateOdometry();
         readTeammateMessages();
-        dbg("state=" + state
-                + " e_Lock=" + enemy_Lock
-                + " t_Lock=" + nav_Lock
-                + " ttl=" + enemy_wait_time
-                + " target=(" + (int)currentTargetX + "," + (int)currentTargetY + ")");
+//        dbg("state=" + state
+//                + " e_Lock=" + enemy_Lock
+//                + " t_Lock=" + nav_Lock
+//                + " ttl=" + enemy_wait_time
+//                + " target=(" + (int)currentTargetX + "," + (int)currentTargetY + ")");
 
         test_time = Math.max(0, test_time - 1);
         stepsSinceEnemyUpdate++;
@@ -170,13 +170,31 @@ public class SimpleRobot extends Brain {
         if (nav_Lock && !enemy_Lock && enemy_wait_time >= 0) {
             if(enemy_wait_time > 0) enemy_wait_time--;
             if (enemy_wait_time == 0) {
-                enemy_Lock = false; // just to be safe
-                nav_Lock = false;
-                currentTargetX = -1;
-                currentTargetY = -1;
-                enemy_wait_time = -1;
+                abandonCurrentTarget();
             }
             return;
+        }
+
+        // 🆕 SCAN FOR ENEMIES EVERY TICK (if not engaged AND cooldown expired)
+        if (!enemy_Lock && !nav_Lock && enemy_wait_time == -1) {
+            IRadarResult enemy = findClosestEnemyOnRadar();
+            if (enemy != null) {
+                double enemyAbsoluteX = myX + enemy.getObjectDistance() * Math.cos(enemy.getObjectDirection());
+                double enemyAbsoluteY = myY + enemy.getObjectDistance() * Math.sin(enemy.getObjectDirection());
+
+                currentTargetX = enemyAbsoluteX;
+                currentTargetY = enemyAbsoluteY;
+                enemy_Lock = true;
+                nav_Lock = true;
+                stepsSinceEnemyUpdate = 0;
+
+                sendLogMessage(robotName + " >>> SPOTTED enemy at (" +
+                        (int)enemyAbsoluteX + "," + (int)enemyAbsoluteY + ")!");
+                broadcastEnemyPosition(enemy);
+
+                state = State.CONVERGING;
+                return;
+            }
         }
         if (enemy_Lock) {
             dbg("enemy_Lock=true -> trying updateTargetFromRadarIfVisible()");
@@ -385,6 +403,21 @@ public class SimpleRobot extends Brain {
         // clear -> move
         myMove();
         consecutiveBlocks = 0;
+    }
+    private IRadarResult findClosestEnemyOnRadar() {
+        IRadarResult closest = null;
+        double bestDist = Double.POSITIVE_INFINITY;
+
+        for (IRadarResult o : detectRadar()) {
+            if (o.getObjectType() == IRadarResult.Types.OpponentMainBot ||
+                    o.getObjectType() == IRadarResult.Types.OpponentSecondaryBot) {
+                if (o.getObjectDistance() < bestDist) {
+                    bestDist = o.getObjectDistance();
+                    closest = o;
+                }
+            }
+        }
+        return closest;
     }
 
     private void broadcastEnemyPosition(IRadarResult enemy) {
