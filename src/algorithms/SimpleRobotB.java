@@ -203,6 +203,29 @@
             tick++;
             updateOdometry();
             readTeammateMessages();
+            // ===== HIGHEST PRIORITY: SHOOT IF POSSIBLE (preempt movement/avoid) =====
+            if (tryEngageFrontMainBot()) return;
+
+            IRadarResult e = findClosestEnemyOnRadar();
+            if (e != null) {
+                double ex = myX + e.getObjectDistance() * Math.cos(e.getObjectDirection());
+                double ey = myY + e.getObjectDistance() * Math.sin(e.getObjectDirection());
+
+                // lock/update target fast (even if we were turning/uturning)
+                currentTargetX = ex;
+                currentTargetY = ey;
+                currentTargetType = getEnemyTypeRadar(e);
+                enemy_Lock = true;
+                nav_Lock = true;
+                stepsSinceEnemyUpdate = 0;
+
+                // fire if not team-blocked; otherwise don't enter wiggle-avoid loop here
+                double ang = normalize(Math.atan2(currentTargetY - myY, currentTargetX - myX));
+                if (!teammateBlocksShot(ang)) {
+                    fire(ang);
+                    return; // ✅ shooting preempts everything
+                }
+            }
     //        dbg("state=" + state
     //                + " e_Lock=" + enemy_Lock
     //                + " t_Lock=" + nav_Lock

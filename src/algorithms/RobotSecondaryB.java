@@ -49,9 +49,6 @@ public class RobotSecondaryB extends Brain {
 
     private static final double ESCAPE_TURN = Math.PI / 2; // 90°
 
-    private static final double WALL_BORDER_MARGIN = 120;
-    private static final double SECONDARY_CLOSER_MARGIN = 300;
-
     // ===== WALL U-TURN SCAN (FIXED) =====
     private int uTurnStep = 0;          // 0..AVOID_MAX_STEPS
     private double uTurnStartHeading = 0;
@@ -115,6 +112,8 @@ public class RobotSecondaryB extends Brain {
     public void step() {
         updateOdometry();
         readTeammateMessages();
+
+
         if (enemyBroadcastCd > 0) enemyBroadcastCd--;
 
         IRadarResult bestEnemy = null;
