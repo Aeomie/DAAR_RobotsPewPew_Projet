@@ -90,6 +90,14 @@ public class SimpleRobotB extends Brain {
     private double defaultY = -1;
     private boolean returningHome = false;
 
+    // TARGET REFRESH COOLDOWN
+    private static final int TARGET_REFRESH_COOLDOWN = 800;
+    private double lastTargetX = -1;
+    private double lastTargetY = -1;
+    private int targetRefreshCooldown = 0;
+    private int target_error_margin = 20;
+    private boolean reset_Target = false;
+
     @Override
     public void activate() {
         identifyRole();
@@ -105,7 +113,7 @@ public class SimpleRobotB extends Brain {
 
         commitForwardSteps = 0;
         turnUsesRadarRayCheck = false;
-
+        targetRefreshCooldown = TARGET_REFRESH_COOLDOWN;
 
     }
 
@@ -153,18 +161,31 @@ public class SimpleRobotB extends Brain {
     }
 
     private void abandonCurrentTarget() {
-        if (lastChanceEnemyCheck()) {
-            return;
-        }
-        currentTargetX = -1;
-        currentTargetY = -1;
+        if (lastChanceEnemyCheck() && !reset_Target) return;
+
+        reset_Target = false;
+        targetRefreshCooldown = TARGET_REFRESH_COOLDOWN;
+
         enemy_Lock = false;
         nav_Lock = false;
         enemy_wait_time = -1;
+        stepsSinceEnemyUpdate = 0;
 
+        // if already home-ish, just clear target and resume
+        if (inRange(myX, defaultX, 50) && inRange(myY, defaultY, 50)) {
+            currentTargetX = -1;
+            currentTargetY = -1;
+            returningHome = false;
+            state = State.MOVE;
+            return;
+        }
+
+        currentTargetX = -1;
+        currentTargetY = -1;
         returningHome = true;
         goBackToDefaultPosition();
     }
+
 
 
     private void lockTarget(double x , double y ){
@@ -186,23 +207,27 @@ public class SimpleRobotB extends Brain {
 //                + " target=(" + (int)currentTargetX + "," + (int)currentTargetY + ")");
 
         test_time = Math.max(0, test_time - 1);
-        stepsSinceEnemyUpdate++;
-        if (stepsSinceEnemyUpdate > TARGET_RESET_COOLDOWN &&  !returningHome) {
-            abandonCurrentTarget();
-        }
-        if (escapeBackSteps > 0 && enemy_wait_time < 0) {
-            myMoveBack();
-            escapeBackSteps--;
-            return;
-        }
-        if (nav_Lock && !enemy_Lock && enemy_wait_time >= 0) {
-            if(enemy_wait_time > 0) enemy_wait_time--;
-            if (enemy_wait_time == 0) {
-                abandonCurrentTarget();
+        if (currentTargetX != -1 && currentTargetY != -1) {
+            if (inRange(lastTargetX, currentTargetX, target_error_margin) &&
+                    inRange(lastTargetY, currentTargetY, target_error_margin) &&
+                    !reset_Target) {
+
+                targetRefreshCooldown = Math.max(0, targetRefreshCooldown - 1);
+                if (targetRefreshCooldown == 0) reset_Target = true;
+
+            } else {
+                lastTargetX = currentTargetX;
+                lastTargetY = currentTargetY;
+                targetRefreshCooldown = TARGET_REFRESH_COOLDOWN;
+                reset_Target = false; // important: because target changed
             }
-            return;
         }
 
+        stepsSinceEnemyUpdate++;
+        if ((stepsSinceEnemyUpdate > TARGET_RESET_COOLDOWN &&  !returningHome) || reset_Target) {
+            abandonCurrentTarget();
+            return;
+        }
         // 🆕 SCAN FOR ENEMIES EVERY TICK (if not engaged AND cooldown expired)
         if (!enemy_Lock && !nav_Lock && enemy_wait_time == -1) {
             IRadarResult enemy = findClosestEnemyOnRadar();
@@ -237,9 +262,9 @@ public class SimpleRobotB extends Brain {
                 enemy_wait_time = WAIT_ENEMY_TIME;
             } else {
                 dbg("ABOUT TO SHOOT");
-                shootAtCurrentTarget();
+                boolean fired = shootAtCurrentTarget();
+                if (fired) return;
                 dbg("SHOT CALLED, returning");
-                return;
             }
         }
 
@@ -464,8 +489,7 @@ public class SimpleRobotB extends Brain {
                     * Math.sin(close.getObjectDirection());
 
             lockTarget(ex, ey);
-            shootAtCurrentTarget();
-            return true;
+            return shootAtCurrentTarget();
         }
         return false;
     }
@@ -492,8 +516,7 @@ public class SimpleRobotB extends Brain {
         }
 
         if (enemy_Lock) {
-            shootAtCurrentTarget();
-            return true;
+            return shootAtCurrentTarget();
         }
 
         IRadarResult frontEnemy =
@@ -506,8 +529,7 @@ public class SimpleRobotB extends Brain {
                     * Math.sin(frontEnemy.getObjectDirection());
 
             lockTarget(ex, ey);
-            shootAtCurrentTarget();
-            return true;
+            return shootAtCurrentTarget();
         }
 
         return false;
@@ -847,23 +869,22 @@ public class SimpleRobotB extends Brain {
             }
             return false;
         }
-
-    private void shootAtCurrentTarget() {
-        if (currentTargetX == -1 || currentTargetY == -1) return;
+    private boolean shootAtCurrentTarget() {
+        if (currentTargetX == -1 || currentTargetY == -1) return false;
 
         double angleToTarget = normalize(Math.atan2(currentTargetY - myY, currentTargetX - myX));
         sendLogMessage("shooting at (x=" + (int) currentTargetX + ", y=" + (int) currentTargetY + ")");
-        // turn toward target first
-//            if (!isSameDirection(myGetHeading(), angleToTarget)) {
-//                targetAngle = angleToTarget;
-//                turnUsesRadarRayCheck = false;     // pure turning, not scanning
-//                afterTurnState = State.CONVERGING; // come back here after turn
-//                state = State.TURNING;
-//                return;
-//            }
-
+        if(teammateBlocksShot(angleToTarget)) {
+            avoidSide = (avoidSide == 0) ? 1 : avoidSide;
+            targetAngle = normalize(angleToTarget + avoidSide * (AVOID_STEP / 3));
+            afterTurnState = State.CONVERGING;
+            turnUsesRadarRayCheck = false;
+            state = State.TURNING;
+            return false;
+        }
         // aligned: shoot
         fire(angleToTarget);
+        return true;
     }
     // ==========================================================
     // MOVEMENT + ODOMETRY
@@ -920,6 +941,20 @@ public class SimpleRobotB extends Brain {
         while (res >= 2 * Math.PI) res -= 2 * Math.PI;
         return res;
     }
+    private boolean inRange(double a, double b, double range) {
+        return Math.abs(a - b) <= range;
+    }
 
+    private boolean teammateBlocksShot(double angle) {
+        for (IRadarResult o : detectRadar()) {
+            if (o.getObjectType() == IRadarResult.Types.TeamMainBot
+                    || o.getObjectType() == IRadarResult.Types.TeamSecondaryBot) {
 
+                if (isSameDirectionRadar(o.getObjectDirection(), angle)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
 }
