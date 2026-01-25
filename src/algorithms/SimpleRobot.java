@@ -5,10 +5,13 @@ import characteristics.IRadarResult;
 import characteristics.Parameters;
 import robotsimulator.Brain;
 
+import java.util.ArrayList;
+
 public class SimpleRobot extends Brain {
 
     private enum Role { WARIO, MARIO, LUIGI, UNDEFINED }
-    private enum State { MOVE, TURNING, BACKING_UP, IDLE, UTURN }
+    private enum State { MOVE, TURNING, BACKING_UP,
+        IDLE, UTURN, CONVERGING, TEST_STOPPED }
 
     private State state = State.MOVE;
 
@@ -51,12 +54,29 @@ public class SimpleRobot extends Brain {
 
     private String robotName = "undefined";
     private Role role = Role.UNDEFINED;
+    private State afterTurnState = State.MOVE;
 
+    // Map bounds discovered (kept for your existing comms)
+    private double northBound = -1;
+    private double westBound = -1;
+    private double eastBound = -1;
+    private double southBound = -1;
+
+    // UPDATE ENEMY LOCATION COMMUNICATIONS
+    private static final double ENEMY_UPDATE_COOLDOWN = 1000; // start high to avoid immediate use
+    private int stepsSinceEnemyUpdate = 0;
+    private double currentTargetX = -1;
+    private double currentTargetY = -1;
+    private static final double FLANK_OFFSET_X = 150;
+    private static final double TARGET_PRECISION = 50;
+
+
+    private int test_time = 300;
     @Override
     public void activate() {
         identifyRole();
 
-        state = State.MOVE;
+        state = State.TEST_STOPPED;
         consecutiveBlocks = 0;
         escapeBackSteps = 0;
         avoidSide = 1;
@@ -67,6 +87,7 @@ public class SimpleRobot extends Brain {
 
         commitForwardSteps = 0;
         turnUsesRadarRayCheck = false;
+
     }
 
     public void identifyRole() {
@@ -109,7 +130,15 @@ public class SimpleRobot extends Brain {
     @Override
     public void step() {
         updateOdometry();
+        readTeammateMessages();
 
+        test_time = Math.max(0, test_time - 1);
+        stepsSinceEnemyUpdate++;
+        if (stepsSinceEnemyUpdate > ENEMY_UPDATE_COOLDOWN) {
+            currentTargetX = -1;
+            currentTargetY = -1;
+            if (state == State.CONVERGING) state = State.MOVE;
+        }
         if (escapeBackSteps > 0) {
             myMoveBack();
             escapeBackSteps--;
@@ -117,6 +146,11 @@ public class SimpleRobot extends Brain {
         }
 
         switch (state) {
+            case TEST_STOPPED:
+                if (test_time <= 0) {
+                    meetAtPoint(1500,150,100);
+                }
+                break;
             case MOVE:
                 moveUsingFrontThenRadarRadius();
                 break;
@@ -133,7 +167,13 @@ public class SimpleRobot extends Brain {
                 myMoveBack();
                 state = State.MOVE;
                 break;
-
+            case CONVERGING:
+                if (currentTargetX != -1 && currentTargetY != -1) {
+                    meetAtPoint(currentTargetX, currentTargetY, TARGET_PRECISION);
+                } else {
+                    state = State.MOVE;
+                }
+                break;
             case IDLE:
                 break;
         }
@@ -157,18 +197,21 @@ public class SimpleRobot extends Brain {
 
         // WALL => UTURN scan (360° search for a free direction)
         if (front.getObjectType() == IFrontSensorResult.Types.WALL) {
+            afterTurnState = State.MOVE;
             enterUTurnMode();
             return;
         }
 
         // FRONT blocked (enemy bot / wreck / etc.)
         if (front.getObjectType() != IFrontSensorResult.Types.NOTHING) {
+            afterTurnState = State.MOVE;
             handleFrontBlockedNonWall();
             return;
         }
 
         // FRONT is clear => now RADAR RADIUS bubble (360°)
         if (radarHasAnythingWithinRadius(RADAR_RADIUS)) {
+            afterTurnState = State.MOVE;
             // pick a side based on the closest obstacle around us (real radius), then start scanning
             Integer side = chooseSideFromClosestRadarWithinRadius(RADAR_RADIUS);
             if (side != null) avoidSide = side;
@@ -185,6 +228,145 @@ public class SimpleRobot extends Brain {
         consecutiveBlocks = 0;
     }
 
+    /* ==========================================================
+        go to Point & reading messages
+     */
+    private void meetAtPoint(double x, double y, double precision) {
+        if (x == -1 || y == -1) {
+            state = State.MOVE;
+            return;
+        }
+
+        double distance = Math.hypot(x - myX, y - myY);
+        if (distance < precision) {
+            sendLogMessage(robotName + " >>> Arrived near target!");
+            state = State.MOVE;
+            return;
+        }
+
+        double angleToTarget = normalize(Math.atan2(y - myY, x - myX));
+
+        // turn toward target first
+        if (!isSameDirection(myGetHeading(), angleToTarget)) {
+            targetAngle = angleToTarget;
+            turnUsesRadarRayCheck = false;     // pure turning, not scanning
+            afterTurnState = State.CONVERGING; // come back here after turn
+            state = State.TURNING;
+            return;
+        }
+
+        // aligned: if wall -> UTURN (then come back to converging)
+        IFrontSensorResult front = detectFront();
+        if (front.getObjectType() == IFrontSensorResult.Types.WALL) {
+            afterTurnState = State.CONVERGING;
+            enterUTurnMode();
+            return;
+        }
+
+        // aligned: if blocked by something -> progressive avoid (then come back to converging)
+        if (front.getObjectType() != IFrontSensorResult.Types.NOTHING) {
+            afterTurnState = State.CONVERGING;
+            handleFrontBlockedNonWall();
+            return;
+        }
+
+        // optional: radar bubble avoidance while converging too
+        if (radarHasAnythingWithinRadius(RADAR_RADIUS)) {
+            Integer side = chooseSideFromClosestRadarWithinRadius(RADAR_RADIUS);
+            if (side != null) avoidSide = side;
+
+            targetAngle = normalize(myGetHeading() + avoidSide * AVOID_STEP);
+            turnUsesRadarRayCheck = true;
+            afterTurnState = State.CONVERGING;
+            state = State.TURNING;
+            return;
+        }
+
+        // clear -> move
+        myMove();
+        consecutiveBlocks = 0;
+    }
+
+    private void broadcastEnemyPosition(IRadarResult enemy) {
+        double enemyAbsoluteX = myX + enemy.getObjectDistance() * Math.cos(enemy.getObjectDirection());
+        double enemyAbsoluteY = myY + enemy.getObjectDistance() * Math.sin(enemy.getObjectDirection());
+
+        String message = "ENEMY_LOCATION|" + robotName + "|" +
+                (int) myX + "|" + (int) myY + "|" +
+                (int) enemyAbsoluteX + "|" + (int) enemyAbsoluteY;
+        broadcast(message);
+    }
+
+    private void readTeammateMessages() {
+        ArrayList<String> messages = fetchAllMessages();
+
+        for (String msg : messages) {
+            if (msg.startsWith("ENEMY_LOCATION|")) {
+                try {
+                    String[] parts = msg.split("\\|");
+                    if (parts.length == 6) {
+                        String spotter = parts[1];
+                        if (robotName.equals(spotter)) continue;
+
+                        double enemyX = Double.parseDouble(parts[4]);
+                        double enemyY = Double.parseDouble(parts[5]);
+                        stepsSinceEnemyUpdate = 0;
+                        sendLogMessage(robotName + " ENEMY from " + spotter+
+                                " (x=" + (int) enemyX + ", y=" + (int) enemyY + ")");
+                        applyFormationOffset(spotter, enemyX, enemyY);
+                    }
+                } catch (Exception ignored) {}
+            }
+
+            if (msg.startsWith("BORDER")) {
+                try {
+                    String[] parts = msg.split("\\|");
+                    if (parts.length == 3) {
+                        String borderType = parts[1];
+                        int pos = Integer.parseInt(parts[2]);
+                        switch (borderType) {
+                            case "NORTH": northBound = pos; break;
+                            case "SOUTH": southBound = pos; break;
+                            case "WEST":  westBound = pos;  break;
+                            case "EAST":  eastBound = pos;  break;
+                        }
+                    }
+                } catch (Exception ignored) {}
+            }
+
+            if (msg.startsWith("SCOUT_ENEMY_LOCATION")) {
+                try {
+                    String[] parts = msg.split("\\|");
+                    if (parts.length == 6) {
+                        String spotter = parts[1];
+                        double enemyX = Double.parseDouble(parts[4]);
+                        double enemyY = Double.parseDouble(parts[5]);
+                        stepsSinceEnemyUpdate = 0;
+
+                        applyFormationOffset(spotter, enemyX, enemyY);
+                    }
+                } catch (Exception ignored) {}
+            }
+        }
+    }
+    private void applyFormationOffset(String spotter, double targetX, double targetY) {
+        int spotterPosition = getRolePosition(spotter);
+        int myPosition = getRolePosition(robotName);
+
+        int relativeOffset = (myPosition - spotterPosition);
+
+        currentTargetX = targetX + (relativeOffset * FLANK_OFFSET_X);
+        currentTargetY = targetY;
+    }
+
+    private int getRolePosition(String name) {
+        switch (name) {
+            case "WARIO": return -1;
+            case "MARIO": return 0;
+            case "LUIGI": return 1;
+            default:      return 0;
+        }
+    }
     // FRONT blocked by something that isn't a wall
     private void handleFrontBlockedNonWall() {
         consecutiveBlocks++;
@@ -225,21 +407,19 @@ public class SimpleRobot extends Brain {
         // aligned
         if (turnUsesRadarRayCheck) {
             if (radarBlocksHeading(targetAngle, RADAR_RADIUS)) {
-                // still blocked in this direction -> keep scanning
                 targetAngle = normalize(targetAngle + avoidSide * AVOID_STEP);
                 return;
             } else {
-                // found a free ray -> move forward (next tick)
                 commitForwardSteps = 1;
                 turnUsesRadarRayCheck = false;
-                state = State.MOVE;
+                state = afterTurnState;  // ✅ instead of MOVE
                 return;
             }
         }
 
-        // no special check, just finish
-        state = State.MOVE;
+        state = afterTurnState;          // ✅ instead of MOVE
     }
+
 
     // ==========================================================
     // UTURN MODE (wall): start facing 180° away, then scan 360° in 30° steps.
@@ -271,7 +451,7 @@ public class SimpleRobot extends Brain {
         if (detectFront().getObjectType() == IFrontSensorResult.Types.NOTHING) {
             // found a free direction
             commitForwardSteps = 1;
-            state = State.MOVE;
+            state = afterTurnState;
             return;
         }
 
@@ -279,7 +459,7 @@ public class SimpleRobot extends Brain {
         if (uTurnChecksLeft <= 0) {
             // full scan failed: back up more and try moving logic again
             escapeBackSteps = Math.max(escapeBackSteps, 2);
-            state = State.MOVE;
+            state = afterTurnState;
             return;
         }
 
@@ -378,7 +558,7 @@ public class SimpleRobot extends Brain {
 
             myX += s * Math.cos(myGetHeading());
             myY += s * Math.sin(myGetHeading());
-            sendLogMessage(robotName + " (x=" + (int) myX + ", y=" + (int) myY + ")");
+//            sendLogMessage(robotName + " (x=" + (int) myX + ", y=" + (int) myY + ")");
         }
 
         isMoving = false;

@@ -409,6 +409,20 @@ public class RobotSecondaryB extends Brain {
             } catch (Exception ignored) {}
         }
     }
+    private void broadcastEnemyPosition(IRadarResult enemy){
+        double enemyAbsoluteX = myX + enemy.getObjectDistance() * Math.cos(enemy.getObjectDirection());
+        double enemyAbsoluteY = myY + enemy.getObjectDistance() * Math.sin(enemy.getObjectDirection());
+
+        // Broadcast both spotter position AND enemy position for smart convergence
+        String message = "SCOUT_ENEMY_LOCATION|" + robotName + "|" +
+                (int)myX + "|" + (int)myY + "|" +
+                (int)enemyAbsoluteX + "|" + (int)enemyAbsoluteY;
+        broadcast(message);
+        sendLogMessage(robotName + " broadcasting: I'm at (" + (int)myX + "," + (int)myY +
+                "), enemy at (" + (int)enemyAbsoluteX + "," + (int)enemyAbsoluteY + ")");
+
+    }
+
 
     // =========================
     // OBSTACLE DETECTION
