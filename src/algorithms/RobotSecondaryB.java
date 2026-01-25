@@ -129,6 +129,10 @@ public class RobotSecondaryB extends Brain {
     public void step() {
         updateOdometry();
         readTeammateMessages();
+        sendLogMessage("WEST : " + westBound+
+                "EAST : " + eastBound+
+                "NORTH : " + northBound+
+                "SOUTH : " + southBound);
         hitSteerCooldown = Math.max(0, hitSteerCooldown - 1);
         damageTakenCheck();
 
@@ -188,6 +192,7 @@ public class RobotSecondaryB extends Brain {
 
             case TURNING_NORTH:
                 turnToward(Parameters.NORTH, State.GOING_NORTH);
+                if(!isSameDirection(myGetHeading(), hitSteerAngle)) {}
                 break;
 
             case TURNING_SOUTH:
@@ -206,12 +211,18 @@ public class RobotSecondaryB extends Brain {
                 doUTurnScan();
                 break;
 
-            case GOING_NORTH:
+            case GOING_NORTH: {
+                // ✅ ensure we're actually facing NORTH before doing NORTH logic
+                if (!isSameDirection(myGetHeading(), Parameters.NORTH)) {
+                    state = State.TURNING_NORTH;
+                    targetAngle = Parameters.NORTH;
+                    break;
+                }
+
                 if (detectWall()) {
                     northBound = myY - DETECTION_RANGE;
                     broadcastBorders("NORTH");
-                    state = State.TURNING_WEST;
-                    targetAngle = Parameters.WEST;
+                    state = State.EXPLORATION_COMPLETE;
                     break;
                 }
                 if (blockedAhead()) {
@@ -220,8 +231,16 @@ public class RobotSecondaryB extends Brain {
                 }
                 myMove();
                 break;
+            }
 
-            case CHECKING_SOUTH:
+            case CHECKING_SOUTH: {
+                // ✅ ensure we're actually facing SOUTH before doing SOUTH logic
+                if (!isSameDirection(myGetHeading(), Parameters.SOUTH)) {
+                    state = State.TURNING_SOUTH;
+                    targetAngle = Parameters.SOUTH;
+                    break;
+                }
+
                 if (detectWall()) {
                     southBound = myY + DETECTION_RANGE;
                     broadcastBorders("SOUTH");
@@ -235,8 +254,16 @@ public class RobotSecondaryB extends Brain {
                 }
                 myMove();
                 break;
+            }
 
-            case CHECKING_WEST:
+            case CHECKING_WEST: {
+                // ✅ ensure we're actually facing WEST before doing WEST logic
+                if (!isSameDirection(myGetHeading(), Parameters.WEST)) {
+                    state = State.TURNING_WEST;
+                    targetAngle = Parameters.WEST;
+                    break;
+                }
+
                 if (detectWall()) {
                     westBound = myX - DETECTION_RANGE;
                     broadcastBorders("WEST");
@@ -249,8 +276,16 @@ public class RobotSecondaryB extends Brain {
                 }
                 myMove();
                 break;
+            }
 
-            case CHECKING_EAST:
+            case CHECKING_EAST: {
+                // ✅ ensure we're actually facing EAST before doing EAST logic
+                if (!isSameDirection(myGetHeading(), Parameters.EAST)) {
+                    state = State.TURNING_EAST;
+                    targetAngle = Parameters.EAST;
+                    break;
+                }
+
                 if (detectWall()) {
                     eastBound = myX + DETECTION_RANGE;
                     broadcastBorders("EAST");
@@ -263,6 +298,7 @@ public class RobotSecondaryB extends Brain {
                 }
                 myMove();
                 break;
+            }
 
             case EXPLORATION_COMPLETE:
                 consecutiveBlocks = 0;
@@ -294,8 +330,7 @@ public class RobotSecondaryB extends Brain {
         // anti-spam guard: only UTURN if we really failed at least once
         IFrontSensorResult front = detectFront();
         if (front.getObjectType() == IFrontSensorResult.Types.WALL
-                && consecutiveBlocks >= 1
-                && shouldUTurnOnWall(front)) {
+                && consecutiveBlocks >= 1) {
             enterUTurnMode(returnState);
             return;
         }
@@ -515,7 +550,7 @@ public class RobotSecondaryB extends Brain {
     private boolean blockedAhead() {
         blockedByTeammateSecondary = false;
 
-        if (wallBlocksNow()) return true;
+        if (detectWall()) return true;
 
         boolean wreck = isRadarObstacleInFront(IRadarResult.Types.Wreck, DETECTION_RANGE);
         boolean teamMain = isRadarObstacleInFront(IRadarResult.Types.TeamMainBot, DETECTION_RANGE);
@@ -541,45 +576,6 @@ public class RobotSecondaryB extends Brain {
     private boolean isInFront(double objDir) {
         double rel = normalize(objDir - myGetHeading());
         return rel < FRONT_CONE || rel > (2 * Math.PI - FRONT_CONE);
-    }
-
-    private boolean wallBlocksNow() {
-        IFrontSensorResult front = detectFront();
-        if (front.getObjectType() != IFrontSensorResult.Types.WALL) return false;
-
-        // No known borders => behave like before (treat wall as blocking)
-        if (!knowsAnyBorder()) return true;
-
-        // Borders known => only block if the NEXT step would violate margin
-        return wouldCrossKnownBorderIfMoveForward(BORDER_MARGIN);
-    }
-
-    private boolean wouldCrossKnownBorderIfMoveForward(double margin) {
-        double step = Parameters.teamBSecondaryBotSpeed;
-        double nx = myX + step * Math.cos(myGetHeading());
-        double ny = myY + step * Math.sin(myGetHeading());
-
-        // Only check borders we actually know (>= 0)
-        if (northBound >= 0 && ny >= northBound - margin) return true;
-        if (southBound >= 0 && ny <= southBound + margin) return true;
-        if (westBound  >= 0 && nx <= westBound  + margin) return true;
-        if (eastBound  >= 0 && nx >= eastBound  - margin) return true;
-
-        return false;
-    }
-
-    private boolean knowsAnyBorder() {
-        return northBound >= 0 || southBound >= 0 || westBound >= 0 || eastBound >= 0;
-    }
-
-    private boolean shouldUTurnOnWall(IFrontSensorResult front) {
-        if (knowsAnyBorder()) {
-            // Only UTURN if next step would violate known border margin
-            return wouldCrossKnownBorderIfMoveForward(BORDER_MARGIN);
-        }
-
-        // Otherwise (no border known): original behavior
-        return true;
     }
 
 
