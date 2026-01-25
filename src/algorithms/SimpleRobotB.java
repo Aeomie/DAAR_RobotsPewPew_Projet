@@ -82,6 +82,9 @@ public class SimpleRobotB extends Brain {
     private static final int WAIT_FOR_SIGNAL = 500;
     private int wait_signal_time = WAIT_FOR_SIGNAL;
 
+    private static final double FLANK_RADIUS = 200;          // stand-off distance from target
+    private static final double FLANK_ANGLE  = Math.toRadians(20);
+
     @Override
     public void activate() {
         identifyRole();
@@ -487,7 +490,8 @@ public class SimpleRobotB extends Brain {
                         nav_Lock = true;
                         sendLogMessage(robotName + " ENEMY from " + spotter+
                                 " (x=" + (int) enemyX + ", y=" + (int) enemyY + ")");
-                        applyFormationOffset(spotter, enemyX, enemyY);
+//                        applyFormationOffset(spotter, enemyX, enemyY);
+                        applyFormationOffsetAngle(enemyX,enemyY);
                     }
                 } catch (Exception ignored) {}
             }
@@ -524,7 +528,8 @@ public class SimpleRobotB extends Brain {
                         nav_Lock = true;
                         sendLogMessage(robotName + " ENEMY from " + spotter+
                                 " (x=" + (int) enemyX + ", y=" + (int) enemyY + ")");
-                        applyFormationOffset(spotter, enemyX, enemyY);
+//                        applyFormationOffset(spotter, enemyX, enemyY);
+                        applyFormationOffsetAngle(enemyX,enemyY);
                     }
                 } catch (Exception ignored) {}
             }
@@ -538,6 +543,22 @@ public class SimpleRobotB extends Brain {
 
         currentTargetX = targetX + (relativeOffset * FLANK_OFFSET_X);
         currentTargetY = targetY;
+    }
+    private void applyFormationOffsetAngle(double targetX, double targetY) {
+        int rel = getRolePosition(robotName); // WARIO=-1, MARIO=0, LUIGI=+1
+
+        // axis is "me -> target"
+        double base = Math.atan2(targetY - myY, targetX - myX);
+
+        // we want points a bit *around* the target, not inside it
+        // choose "behind target" relative to me, so we don't collide head-on
+        double behind = base + Math.PI;
+
+        double angleOffset = (rel == 0) ? 0 : (rel > 0 ? +FLANK_ANGLE : -FLANK_ANGLE);
+        double a = behind + angleOffset;
+
+        currentTargetX = targetX + FLANK_RADIUS * Math.cos(a);
+        currentTargetY = targetY + FLANK_RADIUS * Math.sin(a);
     }
 
     private int getRolePosition(String name) {
