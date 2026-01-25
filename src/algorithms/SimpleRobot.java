@@ -69,10 +69,10 @@ public class SimpleRobot extends Brain {
     private double currentTargetY = -1;
     private static final double FLANK_OFFSET_X = 150;
     private static final double TARGET_PRECISION = 50;
-    private boolean target_Lock = false; // to differentiate between meetAtPoint to just meet or to enemy location
+    private boolean nav_Lock = false; // to differentiate between meetAtPoint to just meet or to enemy location
     private boolean enemy_Lock = false;
-    private static final int WAIT_TARGET_TIME = 50;
-    private int target_wait_time = 0;
+    private static final int WAIT_ENEMY_TIME = 150;
+    private int enemy_wait_time = -1;
 
 
     private int test_time = 300;
@@ -138,6 +138,14 @@ public class SimpleRobot extends Brain {
         sendLogMessage("[t=" + tick + "] " + s);
     }
 
+    private void abandonCurrentTarget() {
+        currentTargetX = -1;
+        currentTargetY = -1;
+        enemy_Lock = false;
+        nav_Lock = false;
+        enemy_wait_time = -1;
+        if (state == State.CONVERGING) state = State.MOVE;
+    }
     @Override
     public void step() {
         tick++;
@@ -151,24 +159,22 @@ public class SimpleRobot extends Brain {
 
         test_time = Math.max(0, test_time - 1);
         stepsSinceEnemyUpdate++;
-        if (stepsSinceEnemyUpdate > TARGET_RESET_COOLDOWN && !(target_Lock && target_wait_time > 0)) {
-            currentTargetX = -1;
-            currentTargetY = -1;
-            enemy_Lock = false;
-            if (state == State.CONVERGING) state = State.MOVE;
+        if (stepsSinceEnemyUpdate > TARGET_RESET_COOLDOWN) {
+            abandonCurrentTarget();
         }
         if (escapeBackSteps > 0) {
             myMoveBack();
             escapeBackSteps--;
             return;
         }
-        if (target_Lock && target_wait_time > 0 && !enemy_Lock) {
-            target_wait_time--;
-            if (target_wait_time == 0) {
-                enemy_Lock = false;
-                target_Lock = false;
+        if (nav_Lock && !enemy_Lock && enemy_wait_time >= 0) {
+            if(enemy_wait_time > 0) enemy_wait_time--;
+            if (enemy_wait_time == 0) {
+                enemy_Lock = false; // just to be safe
+                nav_Lock = false;
                 currentTargetX = -1;
                 currentTargetY = -1;
+                enemy_wait_time = -1;
             }
         }
         if (enemy_Lock) {
@@ -180,8 +186,8 @@ public class SimpleRobot extends Brain {
             if (!seesEnemy) {
                 dbg("LOST enemy -> dropping enemy_Lock, starting TTL");
                 enemy_Lock = false;
-                target_Lock = true;
-                target_wait_time = WAIT_TARGET_TIME;
+                nav_Lock = true;
+                enemy_wait_time = WAIT_ENEMY_TIME;
             } else {
                 dbg("ABOUT TO SHOOT");
                 shootAtCurrentTarget();
@@ -297,7 +303,7 @@ public class SimpleRobot extends Brain {
         double SEARCH_RADIUS = 350;
         double distance_to_point = Math.hypot(x - myX, y - myY);
 
-        if (distance_to_point < SEARCH_RADIUS && currentTargetX != -1 && currentTargetY != -1 && target_Lock) {
+        if (distance_to_point < SEARCH_RADIUS && currentTargetX != -1 && currentTargetY != -1 && nav_Lock) {
             double targetX = -1;
             double targetY = -1;
             double dist = 1e7;
@@ -322,14 +328,16 @@ public class SimpleRobot extends Brain {
                 currentTargetX = targetX;
                 currentTargetY = targetY;
                 enemy_Lock = true;
-                target_Lock = true;
-                target_wait_time = WAIT_TARGET_TIME;
+                nav_Lock = true;
+                enemy_wait_time = WAIT_ENEMY_TIME;
                 sendLogMessage(robotName + " >>> Enemy acquired at (x=" + (int) currentTargetX + ", y=" + (int) currentTargetY + ")");
                 stepsSinceEnemyUpdate = 0;
                 // Continue converging to updated position
             }
         }
         if (distance_to_point < precision) {
+            // we're there and no enemies
+//            abandonCurrentTarget(); // to be safe
             sendLogMessage(robotName + " >>> Arrived near target!");
             state = State.MOVE;
             return;
@@ -402,7 +410,7 @@ public class SimpleRobot extends Brain {
                         double enemyX = Double.parseDouble(parts[4]);
                         double enemyY = Double.parseDouble(parts[5]);
                         stepsSinceEnemyUpdate = 0;
-                        target_Lock = true;
+                        nav_Lock = true;
                         sendLogMessage(robotName + " ENEMY from " + spotter+
                                 " (x=" + (int) enemyX + ", y=" + (int) enemyY + ")");
                         applyFormationOffset(spotter, enemyX, enemyY);
@@ -434,7 +442,7 @@ public class SimpleRobot extends Brain {
                         double enemyX = Double.parseDouble(parts[4]);
                         double enemyY = Double.parseDouble(parts[5]);
                         stepsSinceEnemyUpdate = 0;
-                        target_Lock = true;
+                        nav_Lock = true;
                         sendLogMessage(robotName + " ENEMY from " + spotter+
                                 " (x=" + (int) enemyX + ", y=" + (int) enemyY + ")");
                         applyFormationOffset(spotter, enemyX, enemyY);
@@ -650,8 +658,8 @@ public class SimpleRobot extends Brain {
                 currentTargetX = enemyX;
                 currentTargetY = enemyY;
                 enemy_Lock = true;
-                target_Lock = true;
-                target_wait_time = WAIT_TARGET_TIME;
+                nav_Lock = true;
+                enemy_wait_time = WAIT_ENEMY_TIME;
                 return true;
             }
             return false;
