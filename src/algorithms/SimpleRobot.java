@@ -80,7 +80,7 @@ public class SimpleRobot extends Brain {
     public void activate() {
         identifyRole();
 
-        state = State.TEST_STOPPED;
+        state = State.MOVE;
         consecutiveBlocks = 0;
         escapeBackSteps = 0;
         avoidSide = 1;
@@ -91,6 +91,7 @@ public class SimpleRobot extends Brain {
 
         commitForwardSteps = 0;
         turnUsesRadarRayCheck = false;
+
 
     }
 
@@ -149,7 +150,7 @@ public class SimpleRobot extends Brain {
             escapeBackSteps--;
             return;
         }
-        if (target_Lock && target_wait_time > 0) {
+        if (target_Lock && target_wait_time > 0 && !enemy_Lock) {
             target_wait_time--;
             if (target_wait_time == 0) {
                 enemy_Lock = false;
@@ -158,8 +159,19 @@ public class SimpleRobot extends Brain {
                 currentTargetY = -1;
             }
         }
+        if (enemy_Lock) {
+            boolean seesEnemy = updateTargetFromRadarIfVisible(); // refresh X/Y if enemy seen
 
-
+            if (!seesEnemy) {
+                // enemy not visible right now -> drop enemy_Lock but keep target_Lock+TTL
+                enemy_Lock = false;
+                target_Lock = true;
+                target_wait_time = WAIT_TARGET_TIME;
+            }else{
+                shootAtCurrentTarget();
+                return;
+            }
+        }
         switch (state) {
             case TEST_STOPPED:
                 if (test_time <= 0) {
@@ -170,11 +182,7 @@ public class SimpleRobot extends Brain {
                 break;
             case MOVE:
                 if (currentTargetX != -1 && currentTargetY != -1) {
-                    if(enemy_Lock){
-                        // attack mode
-                    }else{
-                        state = State.CONVERGING;
-                    }
+                    state = State.CONVERGING;
                     break;
                 }
                 moveUsingFrontThenRadarRadius();
@@ -411,7 +419,9 @@ public class SimpleRobot extends Brain {
                         double enemyX = Double.parseDouble(parts[4]);
                         double enemyY = Double.parseDouble(parts[5]);
                         stepsSinceEnemyUpdate = 0;
-
+                        target_Lock = true;
+                        sendLogMessage(robotName + " ENEMY from " + spotter+
+                                " (x=" + (int) enemyX + ", y=" + (int) enemyY + ")");
                         applyFormationOffset(spotter, enemyX, enemyY);
                     }
                 } catch (Exception ignored) {}
@@ -603,6 +613,52 @@ public class SimpleRobot extends Brain {
         return turn;
     }
 
+    // ATTACKING FUNCTIONS
+        private boolean updateTargetFromRadarIfVisible(){
+            double enemyX = -1;
+            double enemyY = -1;
+            double dist = Double.POSITIVE_INFINITY;
+            for (IRadarResult o : detectRadar()) {
+                if (o.getObjectType() == IRadarResult.Types.OpponentMainBot ||
+                        o.getObjectType() == IRadarResult.Types.OpponentSecondaryBot) {
+                    double enemyAbsoluteX = myX + o.getObjectDistance() * Math.cos(o.getObjectDirection());
+                    double enemyAbsoluteY = myY + o.getObjectDistance() * Math.sin(o.getObjectDirection());
+                    if(Math.hypot(enemyAbsoluteX - currentTargetX, enemyAbsoluteY - currentTargetY) < dist) {
+                        dist = Math.hypot(enemyAbsoluteX - currentTargetX, enemyAbsoluteY - currentTargetY);
+                        enemyX = enemyAbsoluteX;
+                        enemyY = enemyAbsoluteY;
+                    }
+                }
+            }
+            if(enemyX != -1 && enemyY != -1) {
+                stepsSinceEnemyUpdate = 0;
+                currentTargetX = enemyX;
+                currentTargetY = enemyY;
+                enemy_Lock = true;
+                target_Lock = true;
+                target_wait_time = WAIT_TARGET_TIME;
+                return true;
+            }
+            return false;
+        }
+
+    private void shootAtCurrentTarget() {
+        if (currentTargetX == -1 || currentTargetY == -1) return;
+
+        double angleToTarget = normalize(Math.atan2(currentTargetY - myY, currentTargetX - myX));
+        sendLogMessage("shooting at (x=" + (int) currentTargetX + ", y=" + (int) currentTargetY + ")");
+        // turn toward target first
+//            if (!isSameDirection(myGetHeading(), angleToTarget)) {
+//                targetAngle = angleToTarget;
+//                turnUsesRadarRayCheck = false;     // pure turning, not scanning
+//                afterTurnState = State.CONVERGING; // come back here after turn
+//                state = State.TURNING;
+//                return;
+//            }
+
+        // aligned: shoot
+        fire(angleToTarget);
+    }
     // ==========================================================
     // MOVEMENT + ODOMETRY
     // ==========================================================
@@ -627,7 +683,7 @@ public class SimpleRobot extends Brain {
 
             myX += s * Math.cos(myGetHeading());
             myY += s * Math.sin(myGetHeading());
-            sendLogMessage(robotName + " (x=" + (int) myX + ", y=" + (int) myY + ")");
+//            sendLogMessage(robotName + " (x=" + (int) myX + ", y=" + (int) myY + ")");
         }
 
         isMoving = false;
@@ -658,4 +714,6 @@ public class SimpleRobot extends Brain {
         while (res >= 2 * Math.PI) res -= 2 * Math.PI;
         return res;
     }
+
+
 }

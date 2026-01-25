@@ -62,6 +62,14 @@ public class RobotSecondaryB extends Brain {
     private static final double TEAM_SECONDARY_RANGE = DETECTION_RANGE;
     private boolean blockedByTeammateSecondary = false;
 
+    // ===== ENEMY BROADCASTING =====
+    private int enemyBroadcastCd = 0;
+    private double lastEnemyBX = -1, lastEnemyBY = -1;
+    private static final int ENEMY_BROADCAST_CD_STEPS = 25;
+    private static final double ENEMY_BROADCAST_MIN_MOVE = 120;
+    private static final double ENEMY_BROADCAST_MAX_DIST = 700;
+
+
     @Override
     public void activate() {
         boolean seesNorth = false;
@@ -103,6 +111,32 @@ public class RobotSecondaryB extends Brain {
     public void step() {
         updateOdometry();
         readTeammateMessages();
+        if (enemyBroadcastCd > 0) enemyBroadcastCd--;
+
+        IRadarResult bestEnemy = null;
+        double bestD = Double.POSITIVE_INFINITY;
+
+        for (IRadarResult o : detectRadar()) {
+            if (o.getObjectType() != IRadarResult.Types.OpponentMainBot &&
+                    o.getObjectType() != IRadarResult.Types.OpponentSecondaryBot) continue;
+
+            if (o.getObjectDistance() < bestD) {
+                bestD = o.getObjectDistance();
+                bestEnemy = o;
+            }
+        }
+
+        if (bestEnemy != null && bestD < ENEMY_BROADCAST_MAX_DIST && enemyBroadcastCd == 0) {
+            double ex = myX + bestEnemy.getObjectDistance() * Math.cos(bestEnemy.getObjectDirection());
+            double ey = myY + bestEnemy.getObjectDistance() * Math.sin(bestEnemy.getObjectDirection());
+
+            if (lastEnemyBX < 0 || Math.hypot(ex - lastEnemyBX, ey - lastEnemyBY) > ENEMY_BROADCAST_MIN_MOVE) {
+                broadcastEnemyPosition(bestEnemy);
+                lastEnemyBX = ex;
+                lastEnemyBY = ey;
+                enemyBroadcastCd = ENEMY_BROADCAST_CD_STEPS;
+            }
+        }
 
         if (escapeBackSteps > 0) {
             myMoveBack();
