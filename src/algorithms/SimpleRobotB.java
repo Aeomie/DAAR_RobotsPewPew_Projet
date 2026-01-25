@@ -19,7 +19,7 @@
         private static final double ANGLE_PRECISION = 0.05;
     
         // --- radar direction tolerance (for "is obstacle on this ray?") ---
-        private static final double RADAR_DIR_EPS = 0.15; // ~8.6°
+        private static final double RADAR_DIR_EPS = 0.15; // ~5.15°
     
         private double targetAngle = 0;
     
@@ -770,7 +770,7 @@
                     targetAngle = normalize(targetAngle + avoidSide * AVOID_STEP);
                     return;
                 } else {
-                    commitForwardSteps = 1;
+                    commitForwardSteps = 3;
                     turnUsesRadarRayCheck = false;
                     state = afterTurnState;  // ✅ instead of MOVE
                     return;
