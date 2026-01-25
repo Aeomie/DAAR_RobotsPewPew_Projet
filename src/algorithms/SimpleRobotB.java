@@ -363,9 +363,13 @@
             IFrontSensorResult front = detectFront();
     
             // If we just found a free heading previously, force 1 forward step (as long as front is clear)
-            if (commitForwardSteps > 0 && front.getObjectType() == IFrontSensorResult.Types.NOTHING) {
-                myMove();
-                commitForwardSteps--;
+            if (commitForwardSteps > 0) {
+                if (front.getObjectType() == IFrontSensorResult.Types.NOTHING) {
+                    myMove();
+                    commitForwardSteps--;
+                } else {
+                    commitForwardSteps = 0; // abort commit if blocked
+                }
                 return;
             }
     
@@ -384,7 +388,7 @@
             }
     
             // FRONT is clear => now RADAR RADIUS bubble (360°)
-            if (radarHasAnythingWithinRadius(RADAR_RADIUS)) {
+            if (radarHasHardThreatWithinRadius(RADAR_RADIUS)) {
                 afterTurnState = State.MOVE;
                 // pick a side based on the closest obstacle around us (real radius), then start scanning
                 Integer side = chooseSideFromClosestRadarWithinRadius(RADAR_RADIUS);
@@ -401,7 +405,20 @@
             myMove();
             consecutiveBlocks = 0;
         }
-    
+
+        private boolean radarHasHardThreatWithinRadius(double radius) {
+            for (IRadarResult o : detectRadar()) {
+                if (o.getObjectDistance() >= radius) continue;
+
+                if (o.getObjectType() == IRadarResult.Types.Wreck ||
+                        o.getObjectType() == IRadarResult.Types.OpponentMainBot ||
+                        o.getObjectType() == IRadarResult.Types.OpponentSecondaryBot) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         /* ==========================================================
             go to Point & reading messages
          */

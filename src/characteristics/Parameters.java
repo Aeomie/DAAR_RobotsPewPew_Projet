@@ -22,7 +22,7 @@ public class Parameters {
   //---TEAM-A-PARAMETERS---//
   //-----------------------//
   public static final String teamAName = "KD Runners";
-  public static final String teamAMainBotBrainClassName = "algorithms.old.RobotScript"; //class given by name; is supposed to extends robotsimulator.Brain
+  public static final String teamAMainBotBrainClassName = "algorithms.SimpleRobot"; //class given by name; is supposed to extends robotsimulator.Brain
   public static final String teamAMainBotAvatar = "avatars/cyclope.png"; //path relative to location of ant build.xml file
   public static final double teamAMainBotRadius = 50, //1 unit = 1mm, body radius
                              teamAMainBotFrontalDetectionRange = 300, //1 unit = 1mm, range of frontal sensor
