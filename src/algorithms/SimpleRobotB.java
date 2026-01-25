@@ -11,7 +11,7 @@ public class SimpleRobotB extends Brain {
 
     private enum Role { WARIO, MARIO, LUIGI, UNDEFINED }
     private enum State { MOVE, TURNING, BACKING_UP,
-        IDLE, UTURN, CONVERGING, TEST_STOPPED }
+        IDLE, UTURN, CONVERGING, TEST_STOPPED, WAITING_FOR_SIGNAL }
 
     private State state = State.MOVE;
 
@@ -73,16 +73,20 @@ public class SimpleRobotB extends Brain {
     private boolean enemy_Lock = false;
     private static final int WAIT_ENEMY_TIME = 80;
     private int enemy_wait_time = -1;
-
+    private static final double FRONT_ATTACK_CONE = 0.35;
 
     private int test_time = 300;
     private int tick = 0;
+
+    // WAIT FOR SIGNAL
+    private static final int WAIT_FOR_SIGNAL = 500;
+    private int wait_signal_time = WAIT_FOR_SIGNAL;
 
     @Override
     public void activate() {
         identifyRole();
 
-        state = State.MOVE;
+        state = State.WAITING_FOR_SIGNAL;
         consecutiveBlocks = 0;
         escapeBackSteps = 0;
         avoidSide = 1;
@@ -145,6 +149,14 @@ public class SimpleRobotB extends Brain {
         nav_Lock = false;
         enemy_wait_time = -1;
         if (state == State.CONVERGING) state = State.MOVE;
+    }
+
+    private void lockTarget(double x , double y ){
+        currentTargetX = x;
+        currentTargetY = y;
+        enemy_Lock = true;
+        nav_Lock = true;
+        state = State.CONVERGING;
     }
     @Override
     public void step() {
@@ -216,6 +228,15 @@ public class SimpleRobotB extends Brain {
         }
 
         switch (state) {
+            case WAITING_FOR_SIGNAL:
+                if (nav_Lock && currentTargetX != -1 && currentTargetY != -1) {
+                    state = State.CONVERGING;   // or MOVE then it will switch to CONVERGING next tick
+                    break;
+                }
+
+                wait_signal_time--;
+                if (wait_signal_time <= 0) state = State.MOVE;
+                break;
             case TEST_STOPPED:
                 if (test_time <= 0) {
                     currentTargetY = 150;
@@ -251,6 +272,21 @@ public class SimpleRobotB extends Brain {
                     break;
                 }
 
+                IFrontSensorResult f = detectFront();
+                if (f.getObjectType() == IFrontSensorResult.Types.OpponentMainBot) {
+                    if (enemy_Lock) {
+                        shootAtCurrentTarget();
+                        return;
+                    }
+                    IRadarResult frontEnemy = findEnemyClosestToHeading(myGetHeading(), FRONT_ATTACK_CONE);
+                    if (frontEnemy != null) {
+                        double ex = myX + frontEnemy.getObjectDistance() * Math.cos(frontEnemy.getObjectDirection());
+                        double ey = myY + frontEnemy.getObjectDistance() * Math.sin(frontEnemy.getObjectDirection());
+                        lockTarget(ex, ey);
+                        fire(myGetHeading());
+                        return;
+                    }
+                }
                 if (currentTargetX != -1 && currentTargetY != -1) {
                     meetAtPoint(currentTargetX, currentTargetY, TARGET_PRECISION);
                 } else {
@@ -678,6 +714,23 @@ public class SimpleRobotB extends Brain {
         if (turn > maxTurn) turn = maxTurn;
         return turn;
     }
+
+    private IRadarResult findEnemyClosestToHeading(double heading, double maxAngle) {
+        IRadarResult best = null;
+        double bestAbs = Double.POSITIVE_INFINITY;
+
+        for (IRadarResult o : detectRadar()) {
+            if (o.getObjectType() != IRadarResult.Types.OpponentMainBot) continue;
+
+            double dAng = Math.abs(normalize(o.getObjectDirection() - heading));
+            if (dAng < maxAngle && dAng < bestAbs) {
+                bestAbs = dAng;
+                best = o;
+            }
+        }
+        return best;
+    }
+
 
     // ATTACKING FUNCTIONS
         private boolean updateTargetFromRadarIfVisible(){
