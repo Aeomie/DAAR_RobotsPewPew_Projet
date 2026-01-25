@@ -69,6 +69,18 @@ public class RobotSecondaryB extends Brain {
     // ===== BORDER MARGIN FOR AVOIDANCE =====
     private static final double BORDER_MARGIN = 150;
 
+    // ===== BULLET HIT REACTION =====
+    private double lastHealth = -1;
+
+    private int hitSteerTicks = 0;
+    private static final int HIT_STEER_TICKS = 20;      // how long we commit to escaping
+    private int hitSteerCooldown = 0;
+    private static final int HIT_STEER_COOLDOWN = 40;   // prevents direction flip spam
+    private double hitSteerAngle = Double.NaN;
+
+    private static final int BULLET_BINS = 16;          // 22.5° bins
+
+
     @Override
     public void activate() {
         identifyRole();
@@ -82,6 +94,11 @@ public class RobotSecondaryB extends Brain {
         consecutiveBlocks = 0;
         escapeBackSteps = 0;
         blockedByTeammateSecondary = false;
+        lastHealth = getHealth();
+        hitSteerTicks = 0;
+        hitSteerCooldown = HIT_STEER_COOLDOWN;
+        hitSteerAngle = Double.NaN;
+
     }
 
     private void identifyRole(){
@@ -112,7 +129,8 @@ public class RobotSecondaryB extends Brain {
     public void step() {
         updateOdometry();
         readTeammateMessages();
-
+        hitSteerCooldown = Math.max(0, hitSteerCooldown - 1);
+        damageTakenCheck();
 
         if (enemyBroadcastCd > 0) enemyBroadcastCd--;
 
@@ -144,6 +162,25 @@ public class RobotSecondaryB extends Brain {
         if (escapeBackSteps > 0) {
             myMoveBack();
             escapeBackSteps--;
+            return;
+        }
+
+        // ===== HIT ESCAPE OVERRIDE: PI flip + run =====
+        if (hitSteerTicks > 0 && !Double.isNaN(hitSteerAngle)) {
+
+            // keep rotating toward the "opposite bullets" angle
+            if (!isSameDirection(myGetHeading(), hitSteerAngle)) {
+                targetAngle = hitSteerAngle;
+                afterTurnState = State.MOVE;
+                state = State.TURNING_BACK;
+            }
+
+            // RUN NOW: backing up creates distance immediately even if turning isn't finished
+            if (escapeBackSteps == 0) escapeBackSteps = 2; // keep some momentum
+            myMoveBack();
+            escapeBackSteps = Math.max(0, escapeBackSteps - 1);
+
+            hitSteerTicks--;
             return;
         }
 
@@ -544,4 +581,67 @@ public class RobotSecondaryB extends Brain {
         // Otherwise (no border known): original behavior
         return true;
     }
+
+
+    // =========================
+    // BULLET HIT REACTION
+    // =========================
+    private void damageTakenCheck() {
+        double h = getHealth();
+        if (lastHealth < 0) lastHealth = h;
+
+        // only trigger on DAMAGE (health goes down)
+        if (h < lastHealth) {
+            if (hitSteerCooldown == 0) {
+                double bulletDir = getDominantBulletDirection();
+                if (!Double.isNaN(bulletDir)) {
+                    hitSteerAngle = normalize(bulletDir + Math.PI);  // <-- your PI flip
+                    hitSteerTicks = HIT_STEER_TICKS;
+
+                    // instantly force a turn toward that angle
+                    targetAngle = hitSteerAngle;
+                    afterTurnState = State.MOVE;
+                    state = State.TURNING_BACK;
+
+                    // crucial: don't stand still while turning
+                    escapeBackSteps = Math.max(escapeBackSteps, 3);  // 2..5 feels good
+                }
+            }
+        }
+
+        lastHealth = h;
+    }
+
+    private double getDominantBulletDirection() {
+        double[] bins = new double[BULLET_BINS];
+        boolean found = false;
+
+        for (IRadarResult o : detectRadar()) {
+            if (o.getObjectType() != IRadarResult.Types.BULLET) continue;
+
+            found = true;
+            double dir = normalize(o.getObjectDirection());
+            double d = Math.max(1.0, o.getObjectDistance());
+
+            // closer bullets matter more
+            double w = 1.0 / (d * d);
+
+            int idx = (int) Math.floor((dir / (2 * Math.PI)) * BULLET_BINS);
+            if (idx < 0) idx = 0;
+            if (idx >= BULLET_BINS) idx = BULLET_BINS - 1;
+
+            bins[idx] += w;
+        }
+
+        if (!found) return Double.NaN;
+
+        int bestIdx = 0;
+        for (int i = 1; i < BULLET_BINS; i++) {
+            if (bins[i] > bins[bestIdx]) bestIdx = i;
+        }
+
+        double binWidth = (2 * Math.PI) / BULLET_BINS;
+        return normalize((bestIdx + 0.5) * binWidth);
+    }
+
 }
