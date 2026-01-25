@@ -7,7 +7,7 @@ import robotsimulator.Brain;
 
 import java.util.ArrayList;
 
-public class SimpleRobot extends Brain {
+public class SimpleRobotA extends Brain {
 
     private enum Role { WARIO, MARIO, LUIGI, UNDEFINED }
     private enum State { MOVE, TURNING, BACKING_UP,
@@ -111,20 +111,20 @@ public class SimpleRobot extends Brain {
 
         switch (whoAmI) {
             case 1:
-                myX = Parameters.teamBMainBot1InitX;
-                myY = Parameters.teamBMainBot1InitY;
+                myX = Parameters.teamAMainBot1InitX;
+                myY = Parameters.teamAMainBot1InitY;
                 robotName = "WARIO";
                 role = Role.WARIO;
                 break;
             case 2:
-                myX = Parameters.teamBMainBot2InitX;
-                myY = Parameters.teamBMainBot2InitY;
+                myX = Parameters.teamAMainBot2InitX;
+                myY = Parameters.teamAMainBot2InitY;
                 robotName = "MARIO";
                 role = Role.MARIO;
                 break;
             case 3:
-                myX = Parameters.teamBMainBot3InitX;
-                myY = Parameters.teamBMainBot3InitY;
+                myX = Parameters.teamAMainBot3InitX;
+                myY = Parameters.teamAMainBot3InitY;
                 robotName = "LUIGI";
                 role = Role.LUIGI;
                 break;
@@ -744,7 +744,7 @@ public class SimpleRobot extends Brain {
         if (!isMoving) return;
 
         if (detectFront().getObjectType() != IFrontSensorResult.Types.WALL) {
-            double s = Parameters.teamBMainBotSpeed;
+            double s = Parameters.teamAMainBotSpeed;
             if (lastMoveWasBack) s = -s;
 
             myX += s * Math.cos(myGetHeading());

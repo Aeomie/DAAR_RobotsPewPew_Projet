@@ -6,7 +6,7 @@ Ce document décrit le comportement des deux IA :
 
 ---
 
-## 1) Robot (Main bot) – `algorithms.Robot`
+## 1) Robot (Main bot) – `algorithms.old.Robot`
 
 ### Objectif global
 Le **main bot** alterne entre :
@@ -126,7 +126,7 @@ Le `Robot` sait aussi lire les messages :
 
 ---
 
-## 2) RobotSecondary (Scout) – `algorithms.RobotSecondary`
+## 2) RobotSecondary (Scout) – `algorithms.old.RobotSecondary`
 
 ### Objectif global
 Le **secondary bot** sert de **scout** :

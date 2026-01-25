@@ -7,7 +7,7 @@ import robotsimulator.Brain;
 
 import java.util.ArrayList;
 
-public class RobotSecondaryB extends Brain {
+public class RobotSecondaryA extends Brain {
 
     private enum Role { UNDEFINED, EXPLORER_ALPHA, EXPLORER_BETA }
     private enum State {
@@ -35,7 +35,7 @@ public class RobotSecondaryB extends Brain {
     // discovered bounds
     private double northBound = -1, southBound = -1, westBound = -1, eastBound = -1;
 
-    private static final double DETECTION_RANGE = Parameters.teamBSecondaryBotFrontalDetectionRange;
+    private static final double DETECTION_RANGE = Parameters.teamASecondaryBotFrontalDetectionRange;
 
     // ===== IMPROVED "SIMPLE" AVOIDANCE (incremental turns) =====
     private static final double AVOID_STEP = Math.PI / 6;      // 30°
@@ -96,15 +96,15 @@ public class RobotSecondaryB extends Brain {
         if (seesNorth) {
             role = Role.EXPLORER_ALPHA;
             robotName = "Explorer Alpha";
-            myX = Parameters.teamBSecondaryBot2InitX;
-            myY = Parameters.teamBSecondaryBot2InitY;
+            myX = Parameters.teamASecondaryBot2InitX;
+            myY = Parameters.teamASecondaryBot2InitY;
             state = State.TURNING_SOUTH;
             targetAngle = Parameters.SOUTH;
         } else {
             role = Role.EXPLORER_BETA;
             robotName = "Explorer Beta";
-            myX = Parameters.teamBSecondaryBot1InitX;
-            myY = Parameters.teamBSecondaryBot1InitY;
+            myX = Parameters.teamASecondaryBot1InitX;
+            myY = Parameters.teamASecondaryBot1InitY;
             state = State.TURNING_NORTH;
             targetAngle = Parameters.NORTH;
         }
@@ -366,7 +366,7 @@ public class RobotSecondaryB extends Brain {
 
         boolean blocked = blockedAhead();
         if (!blocked) {
-            double s = Parameters.teamBSecondaryBotSpeed;
+            double s = Parameters.teamASecondaryBotSpeed;
             if (lastMoveWasBack) s = -s;
 
             myX += s * Math.cos(myGetHeading());
