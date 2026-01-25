@@ -148,12 +148,19 @@ public class SimpleRobot extends Brain {
         switch (state) {
             case TEST_STOPPED:
                 if (test_time <= 0) {
-                    meetAtPoint(1500,150,100);
+                    currentTargetY = 150;
+                    currentTargetX = 1500;
+                    state = State.CONVERGING;
                 }
                 break;
             case MOVE:
+                if (currentTargetX != -1 && currentTargetY != -1) {
+                    state = State.CONVERGING;
+                    break;
+                }
                 moveUsingFrontThenRadarRadius();
                 break;
+
 
             case TURNING:
                 doTurningWithRadarRayCheck();
@@ -168,6 +175,12 @@ public class SimpleRobot extends Brain {
                 state = State.MOVE;
                 break;
             case CONVERGING:
+                if (commitForwardSteps > 0 && detectFront().getObjectType() == IFrontSensorResult.Types.NOTHING) {
+                    myMove();
+                    commitForwardSteps--;
+                    break;
+                }
+
                 if (currentTargetX != -1 && currentTargetY != -1) {
                     meetAtPoint(currentTargetX, currentTargetY, TARGET_PRECISION);
                 } else {
@@ -558,7 +571,7 @@ public class SimpleRobot extends Brain {
 
             myX += s * Math.cos(myGetHeading());
             myY += s * Math.sin(myGetHeading());
-//            sendLogMessage(robotName + " (x=" + (int) myX + ", y=" + (int) myY + ")");
+            sendLogMessage(robotName + " (x=" + (int) myX + ", y=" + (int) myY + ")");
         }
 
         isMoving = false;
