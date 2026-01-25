@@ -76,6 +76,8 @@ public class SimpleRobot extends Brain {
 
 
     private int test_time = 300;
+    private int tick = 0;
+
     @Override
     public void activate() {
         identifyRole();
@@ -132,10 +134,20 @@ public class SimpleRobot extends Brain {
         }
     }
 
+    private void dbg(String s) {
+        sendLogMessage("[t=" + tick + "] " + s);
+    }
+
     @Override
     public void step() {
+        tick++;
         updateOdometry();
         readTeammateMessages();
+//        dbg("state=" + state
+//                + " e_Lock=" + enemy_Lock
+//                + " t_Lock=" + target_Lock
+//                + " ttl=" + target_wait_time
+//                + " target=(" + (int)currentTargetX + "," + (int)currentTargetY + ")");
 
         test_time = Math.max(0, test_time - 1);
         stepsSinceEnemyUpdate++;
@@ -160,18 +172,24 @@ public class SimpleRobot extends Brain {
             }
         }
         if (enemy_Lock) {
-            boolean seesEnemy = updateTargetFromRadarIfVisible(); // refresh X/Y if enemy seen
+            dbg("enemy_Lock=true -> trying updateTargetFromRadarIfVisible()");
+            boolean seesEnemy = updateTargetFromRadarIfVisible();
+            dbg("seesEnemy=" + seesEnemy
+                    + " afterUpdate target=(" + (int)currentTargetX + "," + (int)currentTargetY + ")");
 
             if (!seesEnemy) {
-                // enemy not visible right now -> drop enemy_Lock but keep target_Lock+TTL
+                dbg("LOST enemy -> dropping enemy_Lock, starting TTL");
                 enemy_Lock = false;
                 target_Lock = true;
                 target_wait_time = WAIT_TARGET_TIME;
-            }else{
+            } else {
+                dbg("ABOUT TO SHOOT");
                 shootAtCurrentTarget();
+                dbg("SHOT CALLED, returning");
                 return;
             }
         }
+
         switch (state) {
             case TEST_STOPPED:
                 if (test_time <= 0) {
@@ -276,46 +294,43 @@ public class SimpleRobot extends Brain {
             state = State.MOVE;
             return;
         }
+        double SEARCH_RADIUS = 350;
+        double distance_to_point = Math.hypot(x - myX, y - myY);
 
-        double distance = Math.hypot(x - myX, y - myY);
-        if (distance < precision) {
-            sendLogMessage(robotName + " >>> Arrived near target!");
-
-
+        if (distance_to_point < SEARCH_RADIUS && currentTargetX != -1 && currentTargetY != -1 && target_Lock) {
             double targetX = -1;
             double targetY = -1;
             double dist = 1e7;
-            // check if enemy is there
-            if(currentTargetX != -1 && currentTargetY != -1 && target_Lock) {
-                for(IRadarResult o : detectRadar()) {
-                    if (o.getObjectType() == IRadarResult.Types.OpponentMainBot ||
-                            o.getObjectType() == IRadarResult.Types.OpponentSecondaryBot) {
-                        double enemyAbsoluteX = myX + o.getObjectDistance() * Math.cos(o.getObjectDirection());
-                        double enemyAbsoluteY = myY + o.getObjectDistance() * Math.sin(o.getObjectDirection());
-                        if(Math.hypot(enemyAbsoluteX - currentTargetX, enemyAbsoluteY - currentTargetY) < dist) {
-                            dist = Math.hypot(enemyAbsoluteX - currentTargetX, enemyAbsoluteY - currentTargetY);
-                            targetX = enemyAbsoluteX;
-                            targetY = enemyAbsoluteY;
-                        }
+
+            for(IRadarResult o : detectRadar()) {
+                if (o.getObjectType() == IRadarResult.Types.OpponentMainBot ||
+                        o.getObjectType() == IRadarResult.Types.OpponentSecondaryBot) {
+                    double enemyAbsoluteX = myX + o.getObjectDistance() * Math.cos(o.getObjectDirection());
+                    double enemyAbsoluteY = myY + o.getObjectDistance() * Math.sin(o.getObjectDirection());
+
+                    // Only lock onto enemies that are reasonably close to where we expect them
+                    double distanceFromExpected = Math.hypot(enemyAbsoluteX - currentTargetX, enemyAbsoluteY - currentTargetY);
+                    if(distanceFromExpected < 300 && distanceFromExpected < dist) { // Within 300 units of expected
+                        dist = distanceFromExpected;
+                        targetX = enemyAbsoluteX;
+                        targetY = enemyAbsoluteY;
                     }
                 }
-                if(targetX != -1 && targetY != -1) {
-                    currentTargetX = targetX;
-                    currentTargetY = targetY;
-                    enemy_Lock = true;
-                    sendLogMessage(robotName + " >>> Enemy reacquired at (x=" + (int) currentTargetX + ", y=" + (int) currentTargetY + ")");
-                    stepsSinceEnemyUpdate = 0;
-                    state = State.CONVERGING; // should turn keep on attackig later
-                    return;
-                }else{
-                    sendLogMessage(robotName + " >>> Enemy lost (waiting TTL).");
-                    enemy_Lock = false;                // we don’t see enemy now
-                    target_Lock = true;                // keep last known point alive
-                    target_wait_time = WAIT_TARGET_TIME; // start/refresh TTL NOW
-                    state = State.CONVERGING;          // keep trying around last known
-                    return;
-                }
             }
+
+            if(targetX != -1 && targetY != -1) {
+                currentTargetX = targetX;
+                currentTargetY = targetY;
+                enemy_Lock = true;
+                target_Lock = true;
+                target_wait_time = WAIT_TARGET_TIME;
+                sendLogMessage(robotName + " >>> Enemy acquired at (x=" + (int) currentTargetX + ", y=" + (int) currentTargetY + ")");
+                stepsSinceEnemyUpdate = 0;
+                // Continue converging to updated position
+            }
+        }
+        if (distance_to_point < precision) {
+            sendLogMessage(robotName + " >>> Arrived near target!");
             state = State.MOVE;
             return;
         }
