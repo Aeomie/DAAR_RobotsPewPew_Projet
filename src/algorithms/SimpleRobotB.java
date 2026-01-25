@@ -85,6 +85,11 @@ public class SimpleRobotB extends Brain {
     private static final double FLANK_RADIUS = 200;          // stand-off distance from target
     private static final double FLANK_ANGLE  = Math.toRadians(20);
 
+    // DEFAULT POINT TO GO BACK TO
+    private double defaultX = -1;
+    private double defaultY = -1;
+    private boolean returningHome = false;
+
     @Override
     public void activate() {
         identifyRole();
@@ -115,7 +120,8 @@ public class SimpleRobotB extends Brain {
         }
 
         int whoAmI = seesNorth && !seesSouth ? 3 : (seesSouth && !seesNorth ? 1 : 2);
-
+        defaultX = Parameters.teamBMainBot2InitX;
+        defaultY = Parameters.teamBMainBot2InitY;
         switch (whoAmI) {
             case 1:
                 myX = Parameters.teamBMainBot1InitX;
@@ -128,6 +134,7 @@ public class SimpleRobotB extends Brain {
                 myY = Parameters.teamBMainBot2InitY;
                 robotName = "MARIO";
                 role = Role.MARIO;
+
                 break;
             case 3:
                 myX = Parameters.teamBMainBot3InitX;
@@ -146,13 +153,19 @@ public class SimpleRobotB extends Brain {
     }
 
     private void abandonCurrentTarget() {
+        if (lastChanceEnemyCheck()) {
+            return;
+        }
         currentTargetX = -1;
         currentTargetY = -1;
         enemy_Lock = false;
         nav_Lock = false;
         enemy_wait_time = -1;
-        if (state == State.CONVERGING) state = State.MOVE;
+
+        returningHome = true;
+        goBackToDefaultPosition();
     }
+
 
     private void lockTarget(double x , double y ){
         currentTargetX = x;
@@ -174,7 +187,7 @@ public class SimpleRobotB extends Brain {
 
         test_time = Math.max(0, test_time - 1);
         stepsSinceEnemyUpdate++;
-        if (stepsSinceEnemyUpdate > TARGET_RESET_COOLDOWN) {
+        if (stepsSinceEnemyUpdate > TARGET_RESET_COOLDOWN &&  !returningHome) {
             abandonCurrentTarget();
         }
         if (escapeBackSteps > 0 && enemy_wait_time < 0) {
@@ -274,21 +287,8 @@ public class SimpleRobotB extends Brain {
                     commitForwardSteps--;
                     break;
                 }
-
-                IFrontSensorResult f = detectFront();
-                if (f.getObjectType() == IFrontSensorResult.Types.OpponentMainBot) {
-                    if (enemy_Lock) {
-                        shootAtCurrentTarget();
-                        return;
-                    }
-                    IRadarResult frontEnemy = findEnemyClosestToHeading(myGetHeading(), FRONT_ATTACK_CONE);
-                    if (frontEnemy != null) {
-                        double ex = myX + frontEnemy.getObjectDistance() * Math.cos(frontEnemy.getObjectDirection());
-                        double ey = myY + frontEnemy.getObjectDistance() * Math.sin(frontEnemy.getObjectDirection());
-                        lockTarget(ex, ey);
-                        fire(myGetHeading());
-                        return;
-                    }
+                if (tryEngageFrontMainBot()) {
+                    return;
                 }
                 if (currentTargetX != -1 && currentTargetY != -1) {
                     meetAtPoint(currentTargetX, currentTargetY, TARGET_PRECISION);
@@ -394,6 +394,14 @@ public class SimpleRobotB extends Brain {
             }
         }
         if (distance_to_point < precision) {
+            if (returningHome) {
+                returningHome = false;
+                nav_Lock = false;
+                currentTargetX = -1;
+                currentTargetY = -1;
+                state = State.WAITING_FOR_SIGNAL; // or MOVE
+                return;
+            }
             // we're there and no enemies
 //            abandonCurrentTarget(); // to be safe
             sendLogMessage(robotName + " >>> Arrived near target!");
@@ -443,6 +451,24 @@ public class SimpleRobotB extends Brain {
         myMove();
         consecutiveBlocks = 0;
     }
+
+    private boolean lastChanceEnemyCheck() {
+        if(tryEngageFrontMainBot()){
+            return true;
+        }
+        IRadarResult close = findClosestEnemyOnRadar();
+        if(close != null){
+            double ex = myX + close.getObjectDistance()
+                    * Math.cos(close.getObjectDirection());
+            double ey = myY + close.getObjectDistance()
+                    * Math.sin(close.getObjectDirection());
+
+            lockTarget(ex, ey);
+            shootAtCurrentTarget();
+            return true;
+        }
+        return false;
+    }
     private IRadarResult findClosestEnemyOnRadar() {
         IRadarResult closest = null;
         double bestDist = Double.POSITIVE_INFINITY;
@@ -458,6 +484,36 @@ public class SimpleRobotB extends Brain {
         }
         return closest;
     }
+    private boolean tryEngageFrontMainBot() {
+        IFrontSensorResult f = detectFront();
+
+        if (f.getObjectType() != IFrontSensorResult.Types.OpponentMainBot) {
+            return false;
+        }
+
+        if (enemy_Lock) {
+            shootAtCurrentTarget();
+            return true;
+        }
+
+        IRadarResult frontEnemy =
+                findEnemyClosestToHeading(myGetHeading(), FRONT_ATTACK_CONE);
+
+        if (frontEnemy != null) {
+            double ex = myX + frontEnemy.getObjectDistance()
+                    * Math.cos(frontEnemy.getObjectDirection());
+            double ey = myY + frontEnemy.getObjectDistance()
+                    * Math.sin(frontEnemy.getObjectDirection());
+
+            lockTarget(ex, ey);
+            shootAtCurrentTarget();
+            return true;
+        }
+
+        return false;
+    }
+
+
 
     private void broadcastEnemyPosition(IRadarResult enemy) {
         double enemyAbsoluteX = myX + enemy.getObjectDistance() * Math.cos(enemy.getObjectDirection());
@@ -567,6 +623,16 @@ public class SimpleRobotB extends Brain {
             case "MARIO": return 0;
             case "LUIGI": return 1;
             default:      return 0;
+        }
+    }
+    private void goBackToDefaultPosition() {
+        if (defaultX != -1 && defaultY != -1) {
+            applyFormationOffsetAngle(defaultX, defaultY); // sets currentTargetX/Y
+            nav_Lock = true;
+            enemy_Lock = false;
+            enemy_wait_time = -1;  // important: don't trigger TTL logic
+            stepsSinceEnemyUpdate = 0; // optional: avoid instant cooldown weirdness
+            state = State.CONVERGING;
         }
     }
     // FRONT blocked by something that isn't a wall
